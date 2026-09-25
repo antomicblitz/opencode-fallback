@@ -278,6 +278,82 @@ describe("TTFT-based timeout", () => {
 	})
 })
 
+describe("request-scoped TTFT window", () => {
+	describe("#given a session that received a first token on a prior turn", () => {
+		test("#when the session goes idle #then firstTokenReceived is cleared", async () => {
+			const deps = createMockDeps()
+			const helpers = createMockHelpers()
+			const sessionID = "ses_completed_turn"
+			deps.sessionStates.set(sessionID, createFallbackState("openai/gpt-5.6-luna"))
+			deps.sessionFirstTokenReceived.set(sessionID, true)
+
+			const { handleEvent } = createEventHandler(deps, helpers)
+			await handleEvent({
+				event: { type: "session.idle", properties: { sessionID } },
+			})
+
+			// The turn is over; the next request must get a fresh TTFT window.
+			expect(deps.sessionFirstTokenReceived.has(sessionID)).toBe(false)
+		})
+	})
+
+	describe("#given a compaction request follows a completed turn (auto-compaction, no idle)", () => {
+		test("#when the compaction assistant message arrives #then a TTFT timeout is armed", async () => {
+			const deps = createMockDeps()
+			const helpers = createMockHelpers()
+			const sessionID = "ses_compaction_ttft"
+			deps.globalFallbackModels = ["deepseek/deepseek-flash"]
+			deps.sessionStates.set(sessionID, createFallbackState("openai/gpt-5.6-luna"))
+			// Stale from the prior turn; no session.idle has cleared it yet.
+			deps.sessionFirstTokenReceived.set(sessionID, true)
+
+			const handler = createMessageUpdateHandler(deps, helpers)
+			await handler({
+				info: {
+					sessionID,
+					role: "assistant",
+					agent: "compaction",
+					model: "openai/gpt-5.6-luna",
+				},
+				parts: [],
+			})
+			await new Promise((r) => globalThis.setTimeout(r, 0))
+
+			expect(helpers.scheduleSessionFallbackTimeout).toHaveBeenCalled()
+		})
+	})
+
+	describe("#given a completed turn then a compaction request (handoff-at-idle path)", () => {
+		test("#when the compaction assistant message arrives #then a TTFT timeout is armed", async () => {
+			const deps = createMockDeps()
+			const helpers = createMockHelpers()
+			const sessionID = "ses_idle_then_compact"
+			deps.globalFallbackModels = ["deepseek/deepseek-flash"]
+			deps.sessionStates.set(sessionID, createFallbackState("openai/gpt-5.6-luna"))
+			deps.sessionFirstTokenReceived.set(sessionID, true)
+
+			const { handleEvent } = createEventHandler(deps, helpers)
+			await handleEvent({
+				event: { type: "session.idle", properties: { sessionID } },
+			})
+
+			const handler = createMessageUpdateHandler(deps, helpers)
+			await handler({
+				info: {
+					sessionID,
+					role: "assistant",
+					agent: "compaction",
+					model: "openai/gpt-5.6-luna",
+				},
+				parts: [],
+			})
+			await new Promise((r) => globalThis.setTimeout(r, 0))
+
+			expect(helpers.scheduleSessionFallbackTimeout).toHaveBeenCalled()
+		})
+	})
+})
+
 describe("MessageAbortedError self-abort suppression", () => {
 	describe("#given message.updated receives MessageAbortedError after plugin-initiated abort", () => {
 		test("#then error is suppressed when sessionSelfAbortTimestamp is within 2s window", async () => {
