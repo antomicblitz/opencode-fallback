@@ -1,10 +1,12 @@
 import type { FallbackState, FallbackResult, FallbackPluginConfig, FallbackPlan, FallbackPlanFailure } from "./types"
 import { logInfo } from "./logger"
+import { isQuotaError } from "./quota-error"
 
 export interface FallbackStateSnapshot {
 	currentModel: string
 	fallbackIndex: number
 	failedModels: Map<string, number>
+	quotaFailures: Map<string, number>
 	attemptCount: number
 	pendingFallbackModel?: string
 }
@@ -14,6 +16,7 @@ export function snapshotFallbackState(state: FallbackState): FallbackStateSnapsh
 		currentModel: state.currentModel,
 		fallbackIndex: state.fallbackIndex,
 		failedModels: new Map(state.failedModels),
+		quotaFailures: new Map(state.quotaFailures),
 		attemptCount: state.attemptCount,
 		pendingFallbackModel: state.pendingFallbackModel,
 	}
@@ -26,6 +29,7 @@ export function restoreFallbackState(
 	state.currentModel = snapshot.currentModel
 	state.fallbackIndex = snapshot.fallbackIndex
 	state.failedModels = new Map(snapshot.failedModels)
+	state.quotaFailures = new Map(snapshot.quotaFailures)
 	state.attemptCount = snapshot.attemptCount
 	state.pendingFallbackModel = snapshot.pendingFallbackModel
 }
@@ -36,6 +40,7 @@ export function createFallbackState(originalModel: string): FallbackState {
 		currentModel: originalModel,
 		fallbackIndex: -1,
 		failedModels: new Map<string, number>(),
+		quotaFailures: new Map<string, number>(),
 		attemptCount: 0,
 		pendingFallbackModel: undefined,
 	}
@@ -44,8 +49,17 @@ export function createFallbackState(originalModel: string): FallbackState {
 export function isModelInCooldown(
 	model: string,
 	state: FallbackState,
-	cooldownSeconds: number
+	cooldownSeconds: number,
+	quotaCooldownSeconds?: number
 ): boolean {
+	// Quota failures outlast the transient cooldown by design: a
+	// quota-exhausted model retried after 60s fails again the same way and
+	// re-primes the prompt cache on the way back down.
+	const quotaFailedAt = state.quotaFailures.get(model)
+	if (quotaFailedAt !== undefined) {
+		const quotaCooldownMs = (quotaCooldownSeconds ?? cooldownSeconds) * 1000
+		if (Date.now() - quotaFailedAt < quotaCooldownMs) return true
+	}
 	const failedAt = state.failedModels.get(model)
 	if (failedAt === undefined) return false
 	const cooldownMs = cooldownSeconds * 1000
@@ -55,7 +69,8 @@ export function isModelInCooldown(
 export function findNextAvailableFallback(
 	state: FallbackState,
 	fallbackModels: string[],
-	cooldownSeconds: number
+	cooldownSeconds: number,
+	quotaCooldownSeconds?: number
 ): string | undefined {
 	for (let i = state.fallbackIndex + 1; i < fallbackModels.length; i++) {
 		const candidate = fallbackModels[i]
@@ -65,7 +80,7 @@ export function findNextAvailableFallback(
 			logInfo(`Skipping fallback model identical to current: ${candidate} (index ${i})`)
 			continue
 		}
-		if (!isModelInCooldown(candidate, state, cooldownSeconds)) {
+		if (!isModelInCooldown(candidate, state, cooldownSeconds, quotaCooldownSeconds)) {
 			return candidate
 		}
 		logInfo(`Skipping fallback model in cooldown: ${candidate} (index ${i})`)
@@ -80,6 +95,9 @@ function applyFallbackPlan(
 ): void {
 	state.fallbackIndex = plan.newFallbackIndex
 	state.failedModels.set(plan.failedModel, Date.now())
+	if (plan.failedQuota) {
+		state.quotaFailures.set(plan.failedModel, Date.now())
+	}
 	state.attemptCount++
 	state.currentModel = plan.newModel
 	state.pendingFallbackModel = pendingFallbackModel
@@ -109,6 +127,7 @@ export function planFallback(
 	state: FallbackState,
 	fallbackModels: string[],
 	config: Required<FallbackPluginConfig>,
+	error?: unknown,
 ): FallbackPlan | FallbackPlanFailure {
 	if (state.attemptCount >= config.max_fallback_attempts) {
 		logInfo(`Max fallback attempts reached for session ${sessionID} (${state.attemptCount})`)
@@ -119,7 +138,12 @@ export function planFallback(
 		}
 	}
 
-	const nextModel = findNextAvailableFallback(state, fallbackModels, config.cooldown_seconds)
+	const nextModel = findNextAvailableFallback(
+		state,
+		fallbackModels,
+		config.cooldown_seconds,
+		config.quota_cooldown_seconds,
+	)
 
 	if (!nextModel) {
 		logInfo(`No available fallback models for session ${sessionID}`)
@@ -129,8 +153,10 @@ export function planFallback(
 		}
 	}
 
+	const failedQuota = error !== undefined && isQuotaError(error)
+
 	logInfo(
-		`Planned fallback for session ${sessionID}: ${state.currentModel} -> ${nextModel} (will be attempt ${state.attemptCount + 1})`
+		`Planned fallback for session ${sessionID}: ${state.currentModel} -> ${nextModel} (will be attempt ${state.attemptCount + 1}${failedQuota ? ", quota failure" : ""})`
 	)
 
 	return {
@@ -138,6 +164,7 @@ export function planFallback(
 		newModel: nextModel,
 		failedModel: state.currentModel,
 		newFallbackIndex: fallbackModels.indexOf(nextModel),
+		failedQuota,
 	}
 }
 
@@ -165,10 +192,15 @@ export function commitFallback(
 
 export function recoverToOriginal(
 	state: FallbackState,
-	cooldownSeconds: number
+	cooldownSeconds: number,
+	quotaCooldownSeconds?: number
 ): boolean {
 	if (state.currentModel === state.originalModel) return false
-	if (isModelInCooldown(state.originalModel, state, cooldownSeconds)) return false
+	if (
+		isModelInCooldown(state.originalModel, state, cooldownSeconds, quotaCooldownSeconds)
+	) {
+		return false
+	}
 
 	state.currentModel = state.originalModel
 	state.fallbackIndex = -1

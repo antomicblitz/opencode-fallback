@@ -632,6 +632,7 @@ export function createMessageUpdateHandler(deps: HookDeps, helpers: AutoRetryHel
 					state,
 					fallbackModels,
 					config,
+					error,
 				)
 
 				if (plan.success) {

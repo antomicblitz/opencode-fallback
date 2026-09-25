@@ -670,4 +670,84 @@ describe("fallback-state", () => {
 			expect(state.pendingFallbackModel).toBe("google/model-a")
 		})
 	})
+
+	describe("#given quota-classified failures", () => {
+		describe("#when a model failed with a payment error", () => {
+			test("#then it stays in cooldown past the transient window", () => {
+				const state = createFallbackState("openai/gpt-5.6-luna")
+
+				const plan = planFallback("s1", state, ["deepseek/deepseek-flash"], DEFAULT_CONFIG, {
+					message: "insufficient balance: OpenAI usage limit reached",
+				})
+				expect(plan.success).toBe(true)
+				if (!plan.success) return
+				expect(plan.failedQuota).toBe(true)
+
+				commitFallback(state, plan)
+
+				// 120s later: transient cooldown (60s) would have expired, but
+				// the quota cooldown (1800s) has not.
+				state.failedModels.set("openai/gpt-5.6-luna", Date.now() - 120_000)
+				state.quotaFailures.set("openai/gpt-5.6-luna", Date.now() - 120_000)
+
+				expect(isModelInCooldown("openai/gpt-5.6-luna", state, 60, 1800)).toBe(true)
+				expect(
+					recoverToOriginal(state, 60, 1800)
+				).toBe(false)
+			})
+		})
+
+		describe("#when a model failed with a transient error", () => {
+			test("#then it uses only the transient cooldown", () => {
+				const state = createFallbackState("openai/gpt-5.6-luna")
+
+				const plan = planFallback("s1", state, ["deepseek/deepseek-flash"], DEFAULT_CONFIG, {
+					message: "503 service unavailable",
+				})
+				expect(plan.success).toBe(true)
+				if (!plan.success) return
+				expect(plan.failedQuota).toBe(false)
+
+				commitFallback(state, plan)
+				expect(state.quotaFailures.size).toBe(0)
+			})
+		})
+
+		describe("#when no error is provided", () => {
+			test("#then the plan records a non-quota failure", () => {
+				const state = createFallbackState("openai/gpt-5.6-luna")
+
+				const plan = planFallback("s1", state, ["deepseek/deepseek-flash"], DEFAULT_CONFIG)
+				expect(plan.success).toBe(true)
+				if (!plan.success) return
+				expect(plan.failedQuota).toBe(false)
+			})
+		})
+
+		describe("#when the quota cooldown expires", () => {
+			test("#then the model becomes available again", () => {
+				const state = createFallbackState("openai/gpt-5.6-luna")
+				state.currentModel = "deepseek/deepseek-flash"
+				state.quotaFailures.set("openai/gpt-5.6-luna", Date.now() - 1801_000)
+
+				expect(
+					recoverToOriginal(state, 60, 1800)
+				).toBe(true)
+			})
+		})
+
+		describe("#when quota failures are snapshotted and restored", () => {
+			test("#then they survive the round-trip", () => {
+				const state = createFallbackState("openai/gpt-5.6-luna")
+				state.quotaFailures.set("openai/gpt-5.6-luna", Date.now())
+
+				const snap = snapshotFallbackState(state)
+				state.quotaFailures.clear()
+
+				restoreFallbackState(state, snap)
+
+				expect(state.quotaFailures.has("openai/gpt-5.6-luna")).toBe(true)
+			})
+		})
+	})
 })

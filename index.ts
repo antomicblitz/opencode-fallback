@@ -77,6 +77,10 @@ export default async function OpenCodeFallbackPlugin(
 				configOverrides?.cooldown_seconds ??
 				fileConfig?.cooldown_seconds ??
 				DEFAULT_CONFIG.cooldown_seconds,
+			quota_cooldown_seconds:
+				configOverrides?.quota_cooldown_seconds ??
+				fileConfig?.quota_cooldown_seconds ??
+				DEFAULT_CONFIG.quota_cooldown_seconds,
 			timeout_seconds:
 				configOverrides?.timeout_seconds ??
 				fileConfig?.timeout_seconds ??
