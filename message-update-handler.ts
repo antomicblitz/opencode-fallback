@@ -173,6 +173,23 @@ export function createMessageUpdateHandler(deps: HookDeps, helpers: AutoRetryHel
 		}
 
 		if (sessionID && role === "assistant" && !error) {
+			// A compaction run is a fresh request. Auto-compaction can fire
+			// mid-turn, before session.idle clears first-token state, so a stale
+			// flag from the prior turn would suppress the TTFT timeout and leave a
+			// stalled compaction with no fallback. Reset once per compaction
+			// request (only while no timeout is armed); once armed, the timer plus
+			// the activity handler keep a genuinely streaming compaction alive.
+			const eventAgent =
+				typeof info?.agent === "string" ? info.agent.trim().toLowerCase() : undefined
+			if (
+				eventAgent === "compaction" &&
+				!sessionAwaitingFallbackResult.has(sessionID) &&
+				deps.sessionFirstTokenReceived.has(sessionID) &&
+				!deps.sessionFallbackTimeouts.has(sessionID)
+			) {
+				deps.sessionFirstTokenReceived.delete(sessionID)
+			}
+
 			if (!sessionAwaitingFallbackResult.has(sessionID)) {
 				// ── PRIMARY MODEL TTFT TIMEOUT ──
 				// Schedule a TTFT timeout when we see the first message.updated for

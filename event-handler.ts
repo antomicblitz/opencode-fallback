@@ -261,6 +261,12 @@ export function createEventHandler(deps: HookDeps, helpers: AutoRetryHelpers) {
 		helpers.clearSessionFallbackTimeout(sessionID)
 		sessionRetryInFlight.delete(sessionID)
 
+		// The turn is complete. First-token tracking is per-request: clear it so
+		// the next request in this session (including a compaction run triggered
+		// at idle) arms a fresh TTFT window. Without this the flag stays true from
+		// the previous turn and a stalled next request never falls back.
+		deps.sessionFirstTokenReceived.delete(sessionID)
+
 		const state = sessionStates.get(sessionID)
 		if (state?.pendingFallbackModel) {
 			state.pendingFallbackModel = undefined
