@@ -7,6 +7,11 @@ export interface FallbackPluginConfig {
 	retryable_error_patterns?: string[]
 	max_fallback_attempts?: number
 	cooldown_seconds?: number
+	/** Cooldown for models that failed with a payment/quota/credit error.
+	 *  Quota failures do not heal in seconds like transient 429/5xx do, so
+	 *  they get a much longer cooldown to prevent oscillation back to the
+	 *  quota-exhausted model (each flip re-primes the prompt cache). */
+	quota_cooldown_seconds?: number
 	/** Time-to-first-token timeout in seconds.  If the fallback model does not
 	 *  produce its first token within this window, it is aborted and the next
 	 *  fallback is tried.  Once streaming begins the timeout is cancelled.
@@ -21,6 +26,11 @@ export interface FallbackState {
 	currentModel: string
 	fallbackIndex: number
 	failedModels: Map<string, number>
+	/** Models that failed with a payment/quota/credit error, mapped to the
+	 *  failure timestamp. These use quota_cooldown_seconds instead of
+	 *  cooldown_seconds so a quota-exhausted model is not retried after a
+	 *  mere 60s. */
+	quotaFailures: Map<string, number>
 	attemptCount: number
 	pendingFallbackModel?: string
 }
@@ -38,6 +48,9 @@ export interface FallbackPlan {
 	newModel: string
 	failedModel: string
 	newFallbackIndex: number
+	/** True when the failing error was classified as payment/quota — the
+	 *  failed model is recorded in quotaFailures on commit. */
+	failedQuota: boolean
 }
 
 export interface FallbackPlanFailure {

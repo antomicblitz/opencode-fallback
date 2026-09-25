@@ -63,6 +63,7 @@ export function createChatMessageHandler(deps: HookDeps, helpers: AutoRetryHelpe
 			})
 			state.originalModel = requestedModel
 			state.failedModels.clear()
+			state.quotaFailures.clear()
 			state.fallbackIndex = -1
 			state.attemptCount = 0
 			return
@@ -74,7 +75,11 @@ export function createChatMessageHandler(deps: HookDeps, helpers: AutoRetryHelpe
 				!sessionRetryInFlight.has(sessionID) &&
 				!sessionAwaitingFallbackResult.has(sessionID)
 			) {
-				const recovered = recoverToOriginal(state, config.cooldown_seconds)
+				const recovered = recoverToOriginal(
+					state,
+					config.cooldown_seconds,
+					config.quota_cooldown_seconds
+				)
 				if (recovered) {
 					logInfo("Recovered to primary model", {
 						sessionID,

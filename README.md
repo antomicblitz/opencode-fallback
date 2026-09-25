@@ -101,6 +101,15 @@ All fields are optional — omit any you want to keep at the default.
   // Default: 60
   "cooldown_seconds": 60,
 
+  // Cooldown for models that failed with a payment/quota/credit error
+  // (payment required, insufficient balance, usage limit, billing, 402).
+  // Quota exhaustion does not heal in seconds like transient 429/5xx, so
+  // these failures get a much longer cooldown to stop the model from
+  // oscillating back — each flip re-primes the prompt cache on a different
+  // provider. Set to 0 to disable and use cooldown_seconds for everything.
+  // Default: 1800
+  "quota_cooldown_seconds": 1800,
+
   // Time-to-first-token timeout in seconds. If the model produces no output
   // within this window it is aborted and the next fallback is tried.
   // Once the model starts streaming the timeout is cancelled — streaming

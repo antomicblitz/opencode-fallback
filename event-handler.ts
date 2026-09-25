@@ -665,7 +665,7 @@ export function createEventHandler(deps: HookDeps, helpers: AutoRetryHelpers) {
 				sessionLastAccess.set(sessionID, Date.now())
 			}
 
-			const plan = planFallback(sessionID, state, fallbackModels, config)
+			const plan = planFallback(sessionID, state, fallbackModels, config, error)
 
 			if (plan.success) {
 				if (config.notify_on_fallback) {
