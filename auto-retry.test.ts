@@ -1,5 +1,7 @@
 import { describe, test, expect, mock, beforeEach } from "bun:test"
+import { readFileSync } from "fs"
 import { createAutoRetryHelpers } from "./auto-retry"
+import { getLogFilePath } from "./logger"
 import type { HookDeps, FallbackPluginConfig, MessagePart } from "./types"
 import { DEFAULT_CONFIG } from "./constants"
 
@@ -316,6 +318,82 @@ describe("auto-retry integration", () => {
 				// No abort inside autoRetryWithFallback (caller already did it)
 				expect(deps.ctx.client.session.abort).not.toHaveBeenCalled()
 				expect(deps.ctx.client.session.promptAsync).toHaveBeenCalled()
+			})
+		})
+	})
+
+	describe("#given a session.timeout with no replayable message", () => {
+		describe("#when the timeout fires", () => {
+			test("#then it does not abort and re-arms the timeout", async () => {
+				const deps = createMockDeps({
+					messagesData: [
+						{ info: { role: "assistant" }, parts: [{ type: "text", text: "response" }] },
+					],
+				})
+				deps.config.timeout_seconds = 0.02
+				deps.globalFallbackModels = ["openai/gpt-4o"]
+				const sessionID = "ses_no_replay_timeout"
+				const { createFallbackState } = await import("./fallback-state")
+				const state = createFallbackState("anthropic/claude-opus-4-6")
+				deps.sessionStates.set(sessionID, state)
+				deps.sessionFirstTokenReceived.set(sessionID, false)
+
+				const helpers = createAutoRetryHelpers(deps)
+				helpers.scheduleSessionFallbackTimeout(sessionID)
+
+				await new Promise((r) => globalThis.setTimeout(r, 100))
+
+				// The in-flight request is left running: no abort, no replay.
+				expect(deps.ctx.client.session.abort).not.toHaveBeenCalled()
+				expect(deps.ctx.client.session.promptAsync).not.toHaveBeenCalled()
+				// A fresh timeout is armed so a later attempt can retry.
+				expect(deps.sessionFallbackTimeouts.has(sessionID)).toBe(true)
+				expect(readFileSync(getLogFilePath(), "utf-8")).toContain(
+					"No replayable message; leaving the in-flight request running instead of aborting"
+				)
+
+				helpers.clearSessionFallbackTimeout(sessionID)
+			})
+		})
+	})
+
+	describe("#given a session.timeout with a replayable message", () => {
+		describe("#when the timeout fires", () => {
+			test("#then it aborts and dispatches the replay with the reused message id", async () => {
+				const sessionID = "ses_replay_timeout"
+				const promptCalls: any[] = []
+				const deps = createMockDeps({
+					messagesData: [
+						{
+							info: { role: "user", id: "msg_user_timeout" },
+							parts: [{ type: "text", text: "hello" }],
+						},
+					],
+					promptAsyncFn: async (args: any) => {
+						promptCalls.push(args)
+						// The replayed request is now streaming — stop the
+						// re-armed timeout from firing again.
+						deps.sessionFirstTokenReceived.set(sessionID, true)
+					},
+				})
+				deps.config.timeout_seconds = 0.02
+				deps.globalFallbackModels = ["anthropic/claude-opus-4-6", "openai/gpt-4o"]
+				const { createFallbackState } = await import("./fallback-state")
+				const state = createFallbackState("anthropic/claude-opus-4-6")
+				deps.sessionStates.set(sessionID, state)
+				deps.sessionFirstTokenReceived.set(sessionID, false)
+
+				const helpers = createAutoRetryHelpers(deps)
+				helpers.scheduleSessionFallbackTimeout(sessionID)
+
+				await new Promise((r) => globalThis.setTimeout(r, 350))
+
+				expect(deps.ctx.client.session.abort).toHaveBeenCalled()
+				expect(promptCalls.length).toBe(1)
+				expect(promptCalls[0].body.messageID).toBe("msg_user_timeout")
+				expect(state.currentModel).toBe("openai/gpt-4o")
+
+				helpers.clearSessionFallbackTimeout(sessionID)
 			})
 		})
 	})
