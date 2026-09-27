@@ -1,6 +1,6 @@
 import type { HookDeps, ChatMessageInput, ChatMessageOutput } from "./types"
 import type { AutoRetryHelpers } from "./auto-retry"
-import { createFallbackState, recoverToOriginal } from "./fallback-state"
+import { createFallbackState, isModelInCooldown, recoverToOriginal } from "./fallback-state"
 import { logInfo, logError } from "./logger"
 
 export function createChatMessageHandler(deps: HookDeps, helpers: AutoRetryHelpers) {
@@ -133,27 +133,54 @@ export function createChatMessageHandler(deps: HookDeps, helpers: AutoRetryHelpe
 				return
 			}
 
-			logError("Detected manual model change, resetting fallback state", {
-				sessionID,
-				from: state.currentModel,
-				to: requestedModel,
-			})
+			// The host re-resolves each turn's model from the persisted session
+			// model, so the next turn after a fallback normally arrives as the
+			// ORIGINAL primary — not as a deliberate user change. While that
+			// primary is in cooldown, the cooldown is the authoritative signal
+			// that its leg is bad: keep the session on the recovery leg and let
+			// the override below re-apply it for this turn.
+			//
+			// Resetting here (2026-09-27) put every turn back on the leg that
+			// had just stalled: each one re-hit the 30s TTFT timeout and
+			// replayed the user's prompt. One session logged 17 timeouts / 14
+			// replays / 8 resets / 0 overrides in ~80 minutes — a duplicated
+			// prompt dispatch roughly every 2.5 minutes.
+			const primaryInCooldown = isModelInCooldown(
+				state.originalModel,
+				state,
+				config.cooldown_seconds,
+				config.quota_cooldown_seconds
+			)
 
-			helpers.clearSessionFallbackTimeout(sessionID)
-			sessionAwaitingFallbackResult.delete(sessionID)
-			// Reset first-token tracking so the new model gets a fresh TTFT window.
-			// Without this, the new model inherits firstTokenReceived=true from the
-			// old model and TTFT is never scheduled.
-			deps.sessionFirstTokenReceived.delete(sessionID)
+			if (requestedModel === state.originalModel && primaryInCooldown) {
+				logInfo("Primary re-asserted while in cooldown; keeping the fallback leg", {
+					sessionID,
+					requestedModel,
+					currentModel: state.currentModel,
+				})
+			} else {
+				logError("Detected manual model change, resetting fallback state", {
+					sessionID,
+					from: state.currentModel,
+					to: requestedModel,
+				})
 
-			if (sessionRetryInFlight.has(sessionID)) {
-				await helpers.abortSessionRequest(sessionID, "manual-model-change")
-				sessionRetryInFlight.delete(sessionID)
+				helpers.clearSessionFallbackTimeout(sessionID)
+				sessionAwaitingFallbackResult.delete(sessionID)
+				// Reset first-token tracking so the new model gets a fresh TTFT window.
+				// Without this, the new model inherits firstTokenReceived=true from the
+				// old model and TTFT is never scheduled.
+				deps.sessionFirstTokenReceived.delete(sessionID)
+
+				if (sessionRetryInFlight.has(sessionID)) {
+					await helpers.abortSessionRequest(sessionID, "manual-model-change")
+					sessionRetryInFlight.delete(sessionID)
+				}
+
+				state = createFallbackState(requestedModel)
+				sessionStates.set(sessionID, state)
+				return
 			}
-
-			state = createFallbackState(requestedModel)
-			sessionStates.set(sessionID, state)
-			return
 		}
 
 		if (state.currentModel === state.originalModel) return

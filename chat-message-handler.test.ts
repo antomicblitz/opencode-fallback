@@ -115,6 +115,71 @@ describe("chat-message-handler", () => {
 			})
 		})
 
+		describe("#when a new turn re-asserts the original primary while it is cooling", () => {
+			test("#then the session keeps the fallback leg and the override applies", async () => {
+				const deps = createMockDeps()
+				const helpers = createMockHelpers()
+				const sessionID = "ses_primary_reasserted"
+				const state = createFallbackedState(
+					"deepseek/deepseek-flash",
+					"openrouter/~deepseek/deepseek-flash-latest",
+					false
+				)
+				deps.sessionStates.set(sessionID, state)
+
+				const handler = createChatMessageHandler(deps, helpers)
+				// The host resolves each turn's model from the persisted session
+				// model, so a post-fallback turn arrives carrying the ORIGINAL
+				// primary. Treating that as a manual change reset the session to
+				// the stalling leg, which re-hit the TTFT timeout and replayed the
+				// prompt — the duplicate-dispatch loop.
+				const input: ChatMessageInput = {
+					sessionID,
+					model: { providerID: "deepseek", modelID: "deepseek-flash" },
+				}
+				const output: ChatMessageOutput = {
+					message: { model: { providerID: "deepseek", modelID: "deepseek-flash" } },
+				}
+
+				await handler(input, output)
+
+				// Not reset to the cooling primary...
+				expect(deps.sessionStates.get(sessionID)!.currentModel).toBe(
+					"openrouter/~deepseek/deepseek-flash-latest"
+				)
+				// ...and this turn runs on the recovery leg instead of re-timing-out.
+				expect(output.message.model!.providerID).toBe("openrouter")
+				expect(output.message.model!.modelID).toBe("~deepseek/deepseek-flash-latest")
+			})
+
+			test("#then a genuine switch to a different model still resets", async () => {
+				const deps = createMockDeps()
+				const helpers = createMockHelpers()
+				const sessionID = "ses_genuine_switch"
+				const state = createFallbackedState(
+					"deepseek/deepseek-flash",
+					"openrouter/~deepseek/deepseek-flash-latest",
+					false
+				)
+				deps.sessionStates.set(sessionID, state)
+
+				const handler = createChatMessageHandler(deps, helpers)
+				const input: ChatMessageInput = {
+					sessionID,
+					model: { providerID: "anthropic", modelID: "claude-opus-4-6" },
+				}
+				const output: ChatMessageOutput = {
+					message: { model: { providerID: "anthropic", modelID: "claude-opus-4-6" } },
+				}
+
+				await handler(input, output)
+
+				// A model that is neither the primary nor the current leg is a real
+				// user choice: the state resets to it.
+				expect(deps.sessionStates.get(sessionID)!.currentModel).toBe("anthropic/claude-opus-4-6")
+			})
+		})
+
 		describe("#when sessionRetryInFlight has sessionID", () => {
 			test("#then recovery does not trigger even if cooldown expired", async () => {
 				const deps = createMockDeps()
