@@ -553,6 +553,12 @@ export function createAutoRetryHelpers(deps: HookDeps) {
 			// the real user message that preceded the compaction attempt.
 			let lastUserPartsRaw: any[] | undefined
 			let lastNonAssistantPartsRaw: any[] | undefined
+			// The id of the last user message we replay.  Passing it as the
+			// dispatch's messageID makes the runtime upsert that user message
+			// (prompt.ts: `id: input.messageID ?? MessageID.ascending()` plus
+			// `sessions.updateMessage(info)`) instead of minting a fresh one on
+			// every replay, which is what produced duplicate prompts.
+			let lastUserMessageID: string | undefined
 
 			for (let i = (msgs?.length ?? 0) - 1; i >= 0; i--) {
 				const m = msgs?.[i]
@@ -573,6 +579,8 @@ export function createAutoRetryHelpers(deps: HookDeps) {
 
 				if (role === "user") {
 					lastUserPartsRaw = parts
+					const messageID = (m?.info?.id ?? (m as any)?.id) as unknown
+					lastUserMessageID = typeof messageID === "string" && messageID.length > 0 ? messageID : undefined
 					break
 				}
 			}
@@ -649,6 +657,11 @@ export function createAutoRetryHelpers(deps: HookDeps) {
 							path: { id: sessionID },
 							body: {
 								...(resolvedAgent ? { agent: resolvedAgent } : {}),
+								// Reuse the original user message id so the runtime
+								// upserts this turn instead of appending a new user
+								// message on every replay.  Omit the key entirely when
+								// no id is available (previous behaviour).
+								...(lastUserMessageID ? { messageID: lastUserMessageID } : {}),
 								model: fallbackModelObj,
 								parts,
 							},

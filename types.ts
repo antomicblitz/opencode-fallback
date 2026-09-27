@@ -132,6 +132,9 @@ export interface PluginContext {
 				path: { id: string }
 				body: {
 					agent?: string
+					/** Reuse an existing user message id so the runtime upserts that
+					 *  message instead of minting a new one for each replay. */
+					messageID?: string
 					model: { providerID: string; modelID: string }
 					parts: MessagePart[]
 				}

@@ -790,6 +790,130 @@ describe("auto-retry integration", () => {
 		})
 	})
 
+	describe("#given autoRetryWithFallback replay message id", () => {
+		describe("#when the last user message has an id", () => {
+			test("#then dispatch reuses it as body.messageID", async () => {
+				const promptCalls: any[] = []
+				const deps = createMockDeps({
+					messagesData: [
+						{
+							info: { role: "user", id: "msg_user_1" },
+							parts: [{ type: "text", text: "hello" }],
+						},
+					],
+					promptAsyncFn: async (args: any) => {
+						promptCalls.push(args)
+					},
+				})
+
+				const helpers = createAutoRetryHelpers(deps)
+				await helpers.autoRetryWithFallback(
+					"test-session",
+					"openai/gpt-4o",
+					undefined,
+					"test"
+				)
+
+				expect(promptCalls.length).toBe(1)
+				expect(promptCalls[0].body.messageID).toBe("msg_user_1")
+			})
+		})
+
+		describe("#when the prompt degrades to text-only", () => {
+			test("#then surviving parts keep their original ids and the message id is reused", async () => {
+				const promptCalls: any[] = []
+				const deps = createMockDeps({
+					messagesData: [
+						{
+							info: { role: "user", id: "msg_user_2" },
+							parts: [
+								{ id: "prt_text_1", type: "text", text: "hello" },
+								{ id: "prt_image_1", type: "image", url: "https://example.com/img.png" },
+							],
+						},
+					],
+					promptAsyncFn: async (args: any) => {
+						promptCalls.push(args)
+						// Tier 1 (text + image) is rejected so the replay degrades.
+						if (args.body.parts.some((p: any) => p.type !== "text")) {
+							throw new Error("Unsupported part types")
+						}
+					},
+				})
+
+				const helpers = createAutoRetryHelpers(deps)
+				await helpers.autoRetryWithFallback(
+					"test-session",
+					"openai/gpt-4o",
+					undefined,
+					"test"
+				)
+
+				const lastCall = promptCalls[promptCalls.length - 1]
+				expect(lastCall.body.parts.length).toBe(1)
+				expect(lastCall.body.parts[0].type).toBe("text")
+				// Original part id survives degradation — no newly minted id.
+				expect(lastCall.body.parts[0].id).toBe("prt_text_1")
+				// The message id is reused on the degraded dispatch too.
+				expect(lastCall.body.messageID).toBe("msg_user_2")
+			})
+		})
+
+		describe("#when the last user message has no id", () => {
+			test("#then body omits messageID entirely", async () => {
+				const promptCalls: any[] = []
+				const deps = createMockDeps({
+					messagesData: [
+						{ info: { role: "user" }, parts: [{ type: "text", text: "hello" }] },
+					],
+					promptAsyncFn: async (args: any) => {
+						promptCalls.push(args)
+					},
+				})
+
+				const helpers = createAutoRetryHelpers(deps)
+				await helpers.autoRetryWithFallback(
+					"test-session",
+					"openai/gpt-4o",
+					undefined,
+					"test"
+				)
+
+				expect(promptCalls.length).toBe(1)
+				expect("messageID" in promptCalls[0].body).toBe(false)
+			})
+		})
+
+		describe("#when there is no user message but a non-assistant message has an id", () => {
+			test("#then messageID is omitted (never reuses a non-user id)", async () => {
+				const promptCalls: any[] = []
+				const deps = createMockDeps({
+					messagesData: [
+						{
+							info: { role: "system", id: "msg_system_1" },
+							parts: [{ type: "text", text: "system prompt" }],
+						},
+					],
+					promptAsyncFn: async (args: any) => {
+						promptCalls.push(args)
+					},
+				})
+
+				const helpers = createAutoRetryHelpers(deps)
+				await helpers.autoRetryWithFallback(
+					"test-session",
+					"openai/gpt-4o",
+					undefined,
+					"session.error"
+				)
+
+				expect(promptCalls.length).toBe(1)
+				expect(promptCalls[0].body.parts[0].text).toBe("system prompt")
+				expect("messageID" in promptCalls[0].body).toBe(false)
+			})
+		})
+	})
+
 	describe("#given autoRetryWithFallback with resolved agent", () => {
 		describe("#when resolvedAgent is provided", () => {
 			test("#then includes agent in promptAsync body", async () => {
