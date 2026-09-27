@@ -66,12 +66,23 @@ export function createChatMessageHandler(deps: HookDeps, helpers: AutoRetryHelpe
 			state.quotaFailures.clear()
 			state.fallbackIndex = -1
 			state.attemptCount = 0
+			// A newly adopted primary deserves a fresh recovery budget.
+			state.recoveryProbes = 0
 			return
 		}
 
-		// Auto-recovery: check if primary model's cooldown has expired
+		// Auto-recovery: check if primary model's cooldown has expired, but
+		// only while this session still has probe budget left.  A session may
+		// self-heal to its primary a bounded number of times; once the budget
+		// is spent it stays parked on the fallback leg so a still-bad primary
+		// cannot cost another TTFT timeout + prompt replay every cooldown
+		// window for the rest of the session's life.
+		const recoveryBudgetExhausted =
+			state.recoveryProbes >= config.max_recovery_probes
+
 		if (state.currentModel !== state.originalModel) {
 			if (
+				!recoveryBudgetExhausted &&
 				!sessionRetryInFlight.has(sessionID) &&
 				!sessionAwaitingFallbackResult.has(sessionID)
 			) {
@@ -81,10 +92,25 @@ export function createChatMessageHandler(deps: HookDeps, helpers: AutoRetryHelpe
 					config.quota_cooldown_seconds
 				)
 				if (recovered) {
+					state.recoveryProbes++
 					logInfo("Recovered to primary model", {
 						sessionID,
 						model: state.originalModel,
 					})
+					// Log the transition into "budget spent" exactly once per
+					// session: only the probe that reaches the cap can emit it,
+					// so later turns (where recovery is simply declined) do not
+					// repeat the line.
+					if (state.recoveryProbes >= config.max_recovery_probes) {
+						logInfo(
+							"Recovery probe budget exhausted; session will stay on the fallback leg",
+							{
+								sessionID,
+								recoveryProbes: state.recoveryProbes,
+								maxRecoveryProbes: config.max_recovery_probes,
+							}
+						)
+					}
 					if (config.notify_on_fallback) {
 						const modelName = state.originalModel.split("/").pop() || state.originalModel
 						ctx.client.tui
@@ -152,12 +178,23 @@ export function createChatMessageHandler(deps: HookDeps, helpers: AutoRetryHelpe
 				config.quota_cooldown_seconds
 			)
 
-			if (requestedModel === state.originalModel && primaryInCooldown) {
-				logInfo("Primary re-asserted while in cooldown; keeping the fallback leg", {
-					sessionID,
-					requestedModel,
-					currentModel: state.currentModel,
-				})
+			// When the recovery budget is spent, the re-asserted primary is
+			// still not trustworthy even after its cooldown expires — keep the
+			// fallback leg rather than resetting to a leg we deliberately
+			// stopped probing.  The one-time "budget exhausted" log already
+			// fired when the last probe was spent, so this path stays silent
+			// (do not log per turn).
+			if (
+				requestedModel === state.originalModel &&
+				(primaryInCooldown || recoveryBudgetExhausted)
+			) {
+				if (primaryInCooldown) {
+					logInfo("Primary re-asserted while in cooldown; keeping the fallback leg", {
+						sessionID,
+						requestedModel,
+						currentModel: state.currentModel,
+					})
+				}
 			} else {
 				logError("Detected manual model change, resetting fallback state", {
 					sessionID,

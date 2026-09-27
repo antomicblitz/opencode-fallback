@@ -73,6 +73,10 @@ export default async function OpenCodeFallbackPlugin(
 				configOverrides?.max_fallback_attempts ??
 				fileConfig?.max_fallback_attempts ??
 				DEFAULT_CONFIG.max_fallback_attempts,
+			max_recovery_probes:
+				configOverrides?.max_recovery_probes ??
+				fileConfig?.max_recovery_probes ??
+				DEFAULT_CONFIG.max_recovery_probes,
 			cooldown_seconds:
 				configOverrides?.cooldown_seconds ??
 				fileConfig?.cooldown_seconds ??

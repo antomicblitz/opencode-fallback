@@ -84,9 +84,79 @@ describe("chat-message-handler", () => {
 				expect(state.currentModel).toBe("anthropic/claude-opus-4-6")
 				expect(state.fallbackIndex).toBe(-1)
 				expect(state.attemptCount).toBe(0)
+				// The successful self-heal consumed the session's probe budget.
+				expect(state.recoveryProbes).toBe(1)
 				// Model override should NOT have been applied (handler returns early)
 				expect(output.message.model!.providerID).toBe("anthropic")
 				expect(output.message.model!.modelID).toBe("claude-opus-4-6")
+			})
+		})
+
+		describe("#when the recovery budget is already spent", () => {
+			test("#then recovery is skipped, the fallback leg is kept, and the override applies", async () => {
+				const deps = createMockDeps()
+				const helpers = createMockHelpers()
+				const sessionID = "ses_budget_exhausted"
+				const state = createFallbackedState(
+					"deepseek/deepseek-flash",
+					"openrouter/~deepseek/deepseek-flash-latest",
+					true
+				)
+				// One self-heal already used; the default budget is 1.
+				state.recoveryProbes = deps.config.max_recovery_probes
+				deps.sessionStates.set(sessionID, state)
+
+				const handler = createChatMessageHandler(deps, helpers)
+				// The host re-resolves the persisted session model, so the turn
+				// arrives carrying the primary even though its cooldown expired.
+				const input: ChatMessageInput = {
+					sessionID,
+					model: { providerID: "deepseek", modelID: "deepseek-flash" },
+				}
+				const output: ChatMessageOutput = {
+					message: { model: { providerID: "deepseek", modelID: "deepseek-flash" } },
+				}
+
+				await handler(input, output)
+
+				// No probe: do not reset to (and re-time-out on) the primary.
+				expect(state.originalModel).toBe("deepseek/deepseek-flash")
+				expect(state.currentModel).toBe("openrouter/~deepseek/deepseek-flash-latest")
+				expect(state.recoveryProbes).toBe(deps.config.max_recovery_probes)
+				// This turn runs on the fallback leg via the model override.
+				expect(output.message.model!.providerID).toBe("openrouter")
+				expect(output.message.model!.modelID).toBe("~deepseek/deepseek-flash-latest")
+			})
+		})
+
+		describe("#when max_recovery_probes is 0", () => {
+			test("#then recovery never triggers even with an expired cooldown", async () => {
+				const deps = createMockDeps({ max_recovery_probes: 0 })
+				const helpers = createMockHelpers()
+				const sessionID = "ses_zero_probe_budget"
+				const state = createFallbackedState(
+					"deepseek/deepseek-flash",
+					"openrouter/~deepseek/deepseek-flash-latest",
+					true
+				)
+				deps.sessionStates.set(sessionID, state)
+
+				const handler = createChatMessageHandler(deps, helpers)
+				const input: ChatMessageInput = {
+					sessionID,
+					model: { providerID: "deepseek", modelID: "deepseek-flash" },
+				}
+				const output: ChatMessageOutput = {
+					message: { model: { providerID: "deepseek", modelID: "deepseek-flash" } },
+				}
+
+				await handler(input, output)
+
+				// Auto-recovery is disabled entirely: stay sticky on the fallback.
+				expect(state.currentModel).toBe("openrouter/~deepseek/deepseek-flash-latest")
+				expect(state.recoveryProbes).toBe(0)
+				expect(output.message.model!.providerID).toBe("openrouter")
+				expect(output.message.model!.modelID).toBe("~deepseek/deepseek-flash-latest")
 			})
 		})
 
@@ -343,6 +413,29 @@ describe("chat-message-handler", () => {
 				expect(state.attemptCount).toBe(0)
 				// No recovery toast should have been shown
 				expect(deps.ctx.client.tui.showToast).not.toHaveBeenCalled()
+			})
+		})
+
+		describe("#when the adopted fallback had already spent recovery probes", () => {
+			test("#then the counter resets to 0 for the newly adopted primary", async () => {
+				const deps = createMockDeps()
+				const helpers = createMockHelpers()
+				const state = createFallbackedState("anthropic/claude-opus-4-6", "google/gemini-pro", false)
+				state.recoveryProbes = 2
+				deps.sessionStates.set("test-session", state)
+
+				const handler = createChatMessageHandler(deps, helpers)
+				await handler(
+					{
+						sessionID: "test-session",
+						model: { providerID: "google", modelID: "gemini-pro" },
+					},
+					{ message: { model: { providerID: "google", modelID: "gemini-pro" } } }
+				)
+
+				// Adopting gemini-pro as the new primary grants a fresh budget.
+				expect(state.originalModel).toBe("google/gemini-pro")
+				expect(state.recoveryProbes).toBe(0)
 			})
 		})
 

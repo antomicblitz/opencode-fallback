@@ -6,6 +6,13 @@ export interface FallbackPluginConfig {
 	 *  a case-insensitive regex and matched against the error message. */
 	retryable_error_patterns?: string[]
 	max_fallback_attempts?: number
+	/** Maximum number of times a session may successfully self-heal back to
+	 *  its primary model before it stays parked on the fallback leg for the
+	 *  rest of the session.  1 = one self-heal attempt (default); 0 = never
+	 *  auto-recover (sticky on the fallback leg).  Leaving this unbounded let
+	 *  a still-bad primary cost a TTFT timeout + prompt replay every cooldown
+	 *  window, indefinitely. */
+	max_recovery_probes?: number
 	cooldown_seconds?: number
 	/** Cooldown for models that failed with a payment/quota/credit error.
 	 *  Quota failures do not heal in seconds like transient 429/5xx do, so
@@ -32,6 +39,10 @@ export interface FallbackState {
 	 *  mere 60s. */
 	quotaFailures: Map<string, number>
 	attemptCount: number
+	/** How many times this session has successfully recovered to its primary
+	 *  model.  Bounded by config.max_recovery_probes so a persistently bad
+	 *  primary cannot be re-probed (with a timeout + prompt replay) forever. */
+	recoveryProbes: number
 	pendingFallbackModel?: string
 }
 
@@ -121,6 +132,9 @@ export interface PluginContext {
 				path: { id: string }
 				body: {
 					agent?: string
+					/** Reuse an existing user message id so the runtime upserts that
+					 *  message instead of minting a new one for each replay. */
+					messageID?: string
 					model: { providerID: string; modelID: string }
 					parts: MessagePart[]
 				}
