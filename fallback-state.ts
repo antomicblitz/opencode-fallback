@@ -8,6 +8,7 @@ export interface FallbackStateSnapshot {
 	failedModels: Map<string, number>
 	quotaFailures: Map<string, number>
 	attemptCount: number
+	recoveryProbes: number
 	pendingFallbackModel?: string
 }
 
@@ -18,6 +19,7 @@ export function snapshotFallbackState(state: FallbackState): FallbackStateSnapsh
 		failedModels: new Map(state.failedModels),
 		quotaFailures: new Map(state.quotaFailures),
 		attemptCount: state.attemptCount,
+		recoveryProbes: state.recoveryProbes,
 		pendingFallbackModel: state.pendingFallbackModel,
 	}
 }
@@ -31,6 +33,7 @@ export function restoreFallbackState(
 	state.failedModels = new Map(snapshot.failedModels)
 	state.quotaFailures = new Map(snapshot.quotaFailures)
 	state.attemptCount = snapshot.attemptCount
+	state.recoveryProbes = snapshot.recoveryProbes
 	state.pendingFallbackModel = snapshot.pendingFallbackModel
 }
 
@@ -42,6 +45,7 @@ export function createFallbackState(originalModel: string): FallbackState {
 		failedModels: new Map<string, number>(),
 		quotaFailures: new Map<string, number>(),
 		attemptCount: 0,
+		recoveryProbes: 0,
 		pendingFallbackModel: undefined,
 	}
 }

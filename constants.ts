@@ -7,6 +7,11 @@ export const DEFAULT_CONFIG: Required<FallbackPluginConfig> = {
 	retry_on_errors: [401, 402, 429, 500, 502, 503, 504],
 	retryable_error_patterns: [],
 	max_fallback_attempts: 10,
+	// One self-heal attempt per session.  0 disables auto-recovery entirely
+	// (the session stays sticky on the fallback leg); leaving this unbounded
+	// let a still-bad primary cost a TTFT timeout + prompt replay every
+	// cooldown window, indefinitely.
+	max_recovery_probes: 1,
 	cooldown_seconds: 60,
 	quota_cooldown_seconds: 1800,
 	timeout_seconds: 30,

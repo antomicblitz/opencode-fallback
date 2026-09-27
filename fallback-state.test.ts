@@ -648,6 +648,7 @@ describe("fallback-state", () => {
 			state.currentModel = "google/model-a"
 			state.fallbackIndex = 1
 			state.attemptCount = 2
+			state.recoveryProbes = 1
 			state.failedModels.set("anthropic/claude-opus-4-6", 1000)
 			state.pendingFallbackModel = "google/model-a"
 
@@ -657,6 +658,7 @@ describe("fallback-state", () => {
 			state.currentModel = "openai/model-b"
 			state.fallbackIndex = 2
 			state.attemptCount = 3
+			state.recoveryProbes = 5
 			state.failedModels.set("google/model-a", 2000)
 			state.pendingFallbackModel = undefined
 
@@ -665,6 +667,7 @@ describe("fallback-state", () => {
 			expect(state.currentModel).toBe("google/model-a")
 			expect(state.fallbackIndex).toBe(1)
 			expect(state.attemptCount).toBe(2)
+			expect(state.recoveryProbes).toBe(1)
 			expect(state.failedModels.size).toBe(1)
 			expect(state.failedModels.has("anthropic/claude-opus-4-6")).toBe(true)
 			expect(state.pendingFallbackModel).toBe("google/model-a")
