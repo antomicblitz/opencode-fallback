@@ -117,6 +117,7 @@ export function createEventHandler(deps: HookDeps, helpers: AutoRetryHelpers) {
 			deps.sessionCompactionInFlight.delete(sessionID)
 			deps.sessionIdleResolvers.delete(sessionID)
 			deps.sessionLastMessageTime.delete(sessionID)
+			deps.sessionRecoveryCandidates.delete(sessionID)
 			helpers.clearSessionFallbackTimeout(sessionID)
 		}
 	}

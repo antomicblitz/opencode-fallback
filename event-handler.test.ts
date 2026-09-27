@@ -54,6 +54,7 @@ describe("createEventHandler", () => {
 				sessionIdleResolvers: new Map(),
 				sessionLastMessageTime: new Map(),
 				sessionCompactionInFlight: new Set(),
+				sessionRecoveryCandidates: new Map(),
 			}
 
 			const resolveAgentForSessionFromContext = mock(async () => "planner")
@@ -140,6 +141,7 @@ describe("createEventHandler", () => {
 				sessionIdleResolvers: new Map(),
 				sessionLastMessageTime: new Map(),
 				sessionCompactionInFlight: new Set(),
+				sessionRecoveryCandidates: new Map(),
 			}
 
 			const autoRetryWithFallback = mock(async () => true)
@@ -212,6 +214,7 @@ describe("createEventHandler", () => {
 				sessionIdleResolvers: new Map(),
 				sessionLastMessageTime: new Map(),
 				sessionCompactionInFlight: new Set(),
+				sessionRecoveryCandidates: new Map(),
 			}
 
 			const autoRetryWithFallback = mock(async () => true)
@@ -281,6 +284,7 @@ describe("createEventHandler", () => {
 				sessionIdleResolvers: new Map(),
 				sessionLastMessageTime: new Map(),
 				sessionCompactionInFlight: new Set(),
+				sessionRecoveryCandidates: new Map(),
 			}
 
 			const autoRetryWithFallback = mock(async () => true)
@@ -349,6 +353,7 @@ describe("createEventHandler", () => {
 				sessionIdleResolvers: new Map(),
 				sessionLastMessageTime: new Map(),
 				sessionCompactionInFlight: new Set(),
+				sessionRecoveryCandidates: new Map(),
 			}
 
 			const autoRetryWithFallback = mock(async () => true)
@@ -414,6 +419,7 @@ describe("createEventHandler", () => {
 				sessionIdleResolvers: new Map(),
 				sessionLastMessageTime: new Map(),
 				sessionCompactionInFlight: new Set(),
+				sessionRecoveryCandidates: new Map(),
 			}
 
 			const autoRetryWithFallback = mock(async () => true)
@@ -488,6 +494,7 @@ describe("createEventHandler", () => {
 				sessionIdleResolvers: new Map(),
 				sessionLastMessageTime: new Map(),
 				sessionCompactionInFlight: new Set(),
+				sessionRecoveryCandidates: new Map(),
 			}
 
 			const autoRetryWithFallback = mock(async () => true)
@@ -553,6 +560,7 @@ describe("createEventHandler", () => {
 				sessionIdleResolvers: new Map(),
 				sessionLastMessageTime: new Map(),
 				sessionCompactionInFlight: new Set(),
+				sessionRecoveryCandidates: new Map(),
 			}
 
 			const autoRetryWithFallback = mock(async () => true)
@@ -621,6 +629,7 @@ describe("createEventHandler", () => {
 				sessionIdleResolvers: new Map(),
 				sessionLastMessageTime: new Map(),
 				sessionCompactionInFlight: new Set(),
+				sessionRecoveryCandidates: new Map(),
 			}
 
 			const autoRetryWithFallback = mock(async () => true)
@@ -687,6 +696,7 @@ describe("createEventHandler", () => {
 				sessionIdleResolvers: new Map([[sessionID, [() => { waiterResolved = true }]]]),
 				sessionLastMessageTime: new Map(),
 				sessionCompactionInFlight: new Set(),
+				sessionRecoveryCandidates: new Map(),
 			}
 
 			const helpers = {
@@ -747,6 +757,7 @@ describe("createEventHandler", () => {
 				sessionIdleResolvers: new Map([[sessionID, [() => {}]]]),
 				sessionLastMessageTime: new Map([[sessionID, Date.now()]]),
 				sessionCompactionInFlight: new Set(),
+				sessionRecoveryCandidates: new Map(),
 			}
 
 			const clearSessionFallbackTimeout = mock(() => {})
@@ -818,6 +829,7 @@ describe("createEventHandler", () => {
 				sessionIdleResolvers: new Map(),
 				sessionLastMessageTime: new Map(),
 				sessionCompactionInFlight: new Set(),
+				sessionRecoveryCandidates: new Map(),
 			}
 
 			const abortSessionRequest = mock(async () => {})
@@ -882,6 +894,7 @@ describe("createEventHandler", () => {
 				sessionIdleResolvers: new Map(),
 				sessionLastMessageTime: new Map(),
 				sessionCompactionInFlight: new Set(),
+				sessionRecoveryCandidates: new Map(),
 			}
 
 			const autoRetryWithFallback = mock(async () => true)
@@ -945,6 +958,7 @@ describe("createEventHandler", () => {
 				sessionIdleResolvers: new Map(),
 				sessionLastMessageTime: new Map(),
 				sessionCompactionInFlight: new Set(),
+				sessionRecoveryCandidates: new Map(),
 			}
 
 			const autoRetryWithFallback = mock(async () => true)
@@ -1006,6 +1020,7 @@ describe("createEventHandler", () => {
 				sessionIdleResolvers: new Map(),
 				sessionLastMessageTime: new Map(),
 				sessionCompactionInFlight: new Set(),
+				sessionRecoveryCandidates: new Map(),
 			}
 
 			const helpers = {
@@ -1070,6 +1085,7 @@ describe("createEventHandler", () => {
 				sessionIdleResolvers: new Map(),
 				sessionLastMessageTime: new Map(),
 				sessionCompactionInFlight: new Set(),
+				sessionRecoveryCandidates: new Map(),
 			}
 
 			const autoRetryWithFallback = mock(async () => true)
@@ -1142,6 +1158,7 @@ describe("createEventHandler", () => {
 				sessionIdleResolvers: new Map(),
 				sessionLastMessageTime: new Map(),
 				sessionCompactionInFlight: new Set(),
+				sessionRecoveryCandidates: new Map(),
 			}
 
 			const autoRetryWithFallback = mock(async () => true)
@@ -1220,6 +1237,7 @@ describe("createEventHandler", () => {
 				sessionIdleResolvers: new Map(),
 				sessionLastMessageTime: new Map(),
 				sessionCompactionInFlight: new Set(),
+				sessionRecoveryCandidates: new Map(),
 			}
 
 			const clearSessionFallbackTimeout = mock(() => {
@@ -1295,6 +1313,7 @@ describe("createEventHandler", () => {
 				sessionIdleResolvers: new Map(),
 				sessionLastMessageTime: new Map(),
 				sessionCompactionInFlight: new Set(),
+				sessionRecoveryCandidates: new Map(),
 			}
 
 			const clearSessionFallbackTimeout = mock(() => {})
@@ -1364,6 +1383,7 @@ describe("createEventHandler", () => {
 				sessionIdleResolvers: new Map(),
 				sessionLastMessageTime: new Map(),
 				sessionCompactionInFlight: new Set(),
+				sessionRecoveryCandidates: new Map(),
 			}
 
 			const autoRetryWithFallback = mock(async () => true)
@@ -1437,6 +1457,7 @@ describe("createEventHandler", () => {
 				sessionIdleResolvers: new Map(),
 				sessionLastMessageTime: new Map(),
 				sessionCompactionInFlight: new Set(),
+				sessionRecoveryCandidates: new Map(),
 			}
 
 			const helpers = {
@@ -1501,6 +1522,7 @@ describe("createEventHandler", () => {
 				sessionIdleResolvers: new Map(),
 				sessionLastMessageTime: new Map(),
 				sessionCompactionInFlight: new Set(),
+				sessionRecoveryCandidates: new Map(),
 			}
 
 			const helpers = {
@@ -1564,6 +1586,7 @@ describe("createEventHandler", () => {
 				sessionIdleResolvers: new Map(),
 				sessionLastMessageTime: new Map(),
 				sessionCompactionInFlight: new Set(),
+				sessionRecoveryCandidates: new Map(),
 			}
 
 			const helpers = {
@@ -1623,6 +1646,7 @@ describe("createEventHandler", () => {
 				sessionIdleResolvers: new Map(),
 				sessionLastMessageTime: new Map(),
 				sessionCompactionInFlight: new Set(),
+				sessionRecoveryCandidates: new Map(),
 			}
 
 			const helpers = {
@@ -1685,6 +1709,7 @@ describe("createEventHandler", () => {
 				sessionIdleResolvers: new Map(),
 				sessionLastMessageTime: new Map(),
 				sessionCompactionInFlight: new Set(),
+				sessionRecoveryCandidates: new Map(),
 			}
 
 			const helpers = {
@@ -1746,6 +1771,7 @@ describe("createEventHandler", () => {
 				sessionIdleResolvers: new Map(),
 				sessionLastMessageTime: new Map(),
 				sessionCompactionInFlight: new Set(),
+				sessionRecoveryCandidates: new Map(),
 			}
 
 			const helpers = {

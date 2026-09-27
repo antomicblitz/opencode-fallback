@@ -484,6 +484,100 @@ describe("OpenCodeFallbackPlugin", () => {
 			})
 		})
 
+		describe("experimental.chat.messages.transform", () => {
+			it("#then repairs a false 'Task cancelled' with the child fallback result", async () => {
+				const childSessionID = "ses_childint"
+
+				// Mock: the child reports its fallback response.
+				;(ctx.client.session.get as any).mockImplementation(() =>
+					Promise.resolve({
+						data: { parentID: "ses_parentint", agent: "planner", status: "idle" },
+					})
+				)
+				;(ctx.client.session.messages as any).mockImplementation(() =>
+					Promise.resolve({
+						data: [
+							{
+								info: { role: "user", agent: "planner" },
+								parts: [{ type: "text", text: "do the child task" }],
+							},
+							{
+								info: { role: "assistant" },
+								parts: [{ type: "text", text: "child fallback result" }],
+							},
+						],
+					})
+				)
+
+				const plugin = await OpenCodeFallbackPlugin(ctx)
+				plugin.config({
+					agents: {
+						planner: {
+							model: "google/primary",
+							fallback_models: ["anthropic/claude-opus-4-6"],
+						},
+					},
+				})
+
+				// Abort the child for a provider-retry fallback.  This records
+				// the child as a recovery candidate, exactly as a real abort does.
+				;(ctx.client.session.abort as any).mockClear()
+				await plugin.event({
+					event: {
+						type: "session.status",
+						properties: {
+							sessionID: childSessionID,
+							status: { type: "retry", attempt: 1, message: "rate limited" },
+						},
+					},
+				})
+				expect(ctx.client.session.abort).toHaveBeenCalled()
+
+				// The parent's next model request carries the cancelled task part.
+				const cancelledPart = {
+					id: "prt_task",
+					type: "tool",
+					tool: "task",
+					callID: "call_task",
+					state: {
+						status: "error",
+						error: "Task cancelled",
+						input: { description: "child task" },
+						metadata: { sessionId: childSessionID },
+						time: { start: 1, end: 2 },
+					},
+				}
+				const output = { messages: [{ info: { role: "assistant" }, parts: [cancelledPart] }] }
+
+				await plugin["experimental.chat.messages.transform"]({}, output as any)
+
+				expect(cancelledPart.state.status).toBe("completed")
+				expect((cancelledPart.state as any).output).toBe("child fallback result")
+			})
+
+			it("#then leaves a cancelled task untouched when the child was not fallback-aborted", async () => {
+				const plugin = await OpenCodeFallbackPlugin(ctx)
+
+				const cancelledPart = {
+					id: "prt_task",
+					type: "tool",
+					tool: "task",
+					callID: "call_task",
+					state: {
+						status: "error",
+						error: "Task cancelled",
+						metadata: { sessionId: "ses_untracked" },
+						time: { start: 1, end: 2 },
+					},
+				}
+				const output = { messages: [{ info: { role: "assistant" }, parts: [cancelledPart] }] }
+
+				await plugin["experimental.chat.messages.transform"]({}, output as any)
+
+				expect(cancelledPart.state.status).toBe("error")
+			})
+		})
+
 		describe("#when session.compacted event is received", () => {
 			it("#then event handler processes compacted event without errors", async () => {
 				const plugin = await OpenCodeFallbackPlugin(ctx)

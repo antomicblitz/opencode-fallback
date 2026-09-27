@@ -215,4 +215,15 @@ export interface HookDeps {
 	 *  the pre-compaction model are suppressed and session.idle does not
 	 *  treat the silence as a "silent model failure". */
 	sessionCompactionInFlight: Set<string>
+	/** Child sessions the plugin aborted on a model-fallback path, keyed by
+	 *  child session id.  OpenCode's task tool ties its BackgroundJob id to
+	 *  the child session id, so aborting the child cancels the parent's task
+	 *  job and makes the task tool report "Task cancelled" — even though the
+	 *  plugin replays the child on the fallback model and it keeps running.
+	 *  The parent's next model request uses this entry to reconcile the
+	 *  cancelled task with the child's real result instead of acting on a
+	 *  premature cancellation.  `abortedAt` rejects stale pre-abort output;
+	 *  `recoveredResult` caches the child's result so later requests reuse it
+	 *  without re-polling. */
+	sessionRecoveryCandidates: Map<string, { abortedAt: number; recoveredResult?: string }>
 }
