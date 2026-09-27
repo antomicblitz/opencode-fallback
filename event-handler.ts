@@ -15,6 +15,7 @@ import {
 	restoreFallbackState,
 } from "./fallback-state"
 import { getFallbackModelsForSession, resolveAgentForSession } from "./config-reader"
+import { shouldLogActivity } from "./activity-log-throttle"
 
 export function createEventHandler(deps: HookDeps, helpers: AutoRetryHelpers) {
 	const {
@@ -56,7 +57,14 @@ export function createEventHandler(deps: HookDeps, helpers: AutoRetryHelpers) {
 		if (sessionAwaitingFallbackResult.has(sessionID)) {
 			const resolvedAgent = resolveAgentForSession(sessionID, undefined)
 			helpers.scheduleSessionFallbackTimeout(sessionID, resolvedAgent)
-			logInfo("Resetting fallback timeout due to activity", { sessionID, activityModel })
+			const decision = shouldLogActivity(sessionID)
+			if (decision.log) {
+				logInfo("Resetting fallback timeout due to activity", {
+					sessionID,
+					activityModel,
+					suppressedSinceLastLog: decision.suppressed,
+				})
+			}
 			return
 		}
 
