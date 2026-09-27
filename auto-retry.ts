@@ -50,6 +50,80 @@ function summarizeParts(parts: MessagePart[] | undefined): {
 	}
 }
 
+type RawSessionMessage = {
+	info?: Record<string, unknown>
+	parts?: any[]
+}
+
+/** A replayable prompt selected from a session's message history. */
+interface ReplaySelection {
+	parts: MessagePart[]
+	source: "last-user" | "last-non-assistant"
+	/** The id of the replayed user message, when the selection was a user
+	 *  message.  Reused as promptAsync's messageID so the runtime upserts the
+	 *  turn instead of minting a duplicate (commit 01e6b33). */
+	messageID?: string
+}
+
+/**
+ * Pick the message to replay from a session's message history.
+ *
+ * Prefer the last user message.  In child subagent sessions the latest
+ * replayable prompt can be non-user (e.g. system/tool), so fall back to the
+ * last non-assistant message with parts.  Skip messages that only contain
+ * "compaction" parts — those are internal to OpenCode's compaction and cannot
+ * be replayed via promptAsync.
+ *
+ * Returns undefined when nothing is replayable.
+ */
+function selectReplayableMessage(
+	msgs: RawSessionMessage[] | undefined
+): ReplaySelection | undefined {
+	let lastUserPartsRaw: any[] | undefined
+	let lastNonAssistantPartsRaw: any[] | undefined
+	let lastUserMessageID: string | undefined
+
+	for (let i = (msgs?.length ?? 0) - 1; i >= 0; i--) {
+		const m = msgs?.[i]
+		const role = ((m?.info?.role ?? (m as any)?.role ?? "") as string).toLowerCase()
+		const parts = m?.parts ?? (m?.info?.parts as any[] | undefined)
+		if (!parts || parts.length === 0) continue
+
+		// Skip compaction-only messages: parts where every part is
+		// type "compaction" (not replayable via promptAsync).
+		const hasOnlyCompactionParts = parts.every((p: any) => p.type === "compaction")
+		if (hasOnlyCompactionParts) continue
+
+		if (!lastNonAssistantPartsRaw && role !== "assistant") {
+			lastNonAssistantPartsRaw = parts
+		}
+
+		if (role === "user") {
+			lastUserPartsRaw = parts
+			const messageID = (m?.info?.id ?? (m as any)?.id) as unknown
+			lastUserMessageID =
+				typeof messageID === "string" && messageID.length > 0 ? messageID : undefined
+			break
+		}
+	}
+
+	const replayPartsRaw = lastUserPartsRaw ?? lastNonAssistantPartsRaw
+	if (!replayPartsRaw || replayPartsRaw.length === 0) return undefined
+
+	// Filter out "compaction" type parts — internal to OpenCode's compaction
+	// and not replayable via promptAsync.
+	const parts: MessagePart[] = replayPartsRaw.filter(
+		(p: any): p is MessagePart => typeof p.type === "string" && p.type !== "compaction"
+	)
+	if (parts.length === 0) return undefined
+
+	return {
+		parts,
+		source: lastUserPartsRaw ? "last-user" : "last-non-assistant",
+		messageID: lastUserPartsRaw ? lastUserMessageID : undefined,
+	}
+}
+
 export function createAutoRetryHelpers(deps: HookDeps) {
 	const {
 		ctx,
@@ -133,6 +207,47 @@ export function createAutoRetryHelpers(deps: HookDeps) {
 				return
 			}
 
+			// Determine the replayable message BEFORE aborting.  Aborting a
+			// request that we cannot replay kills the turn silently — no
+			// recovery, no user-visible answer — which is worse than a slow
+			// request.  Compaction fallbacks are exempt: they re-run via
+			// session.summarize (not a prompt replay) and still need the abort.
+			const fallbackModels = getFallbackModelsForSession(
+				sessionID,
+				resolvedAgent,
+				deps.agentConfigs,
+				deps.globalFallbackModels
+			)
+
+			let preparedReplay: ReplaySelection | undefined
+			if (fallbackModels.length > 0 && resolvedAgent !== "compaction") {
+				try {
+					const messagesResp = await ctx.client.session.messages({
+						path: { id: sessionID },
+						query: { directory: ctx.directory },
+					})
+					preparedReplay = selectReplayableMessage(messagesResp.data)
+				} catch (error) {
+					logError("Failed to inspect session for a replayable message", {
+						sessionID,
+						error: String(error),
+					})
+					preparedReplay = undefined
+				}
+
+				if (!preparedReplay) {
+					logInfo(
+						"No replayable message; leaving the in-flight request running instead of aborting",
+						{ sessionID, currentModel: state.currentModel }
+					)
+					// Re-arm the timeout instead of falling back: the request
+					// can still complete on its own, and a later timeout can
+					// try again once a replayable message exists.
+					scheduleSessionFallbackTimeout(sessionID, resolvedAgent)
+					return
+				}
+			}
+
 			// For TTFT timeouts we MUST abort even for child sessions — the
 			// hung model is still consuming the session and we cannot send a
 			// replay until it is stopped.  The downstream autoRetryWithFallback
@@ -149,12 +264,6 @@ export function createAutoRetryHelpers(deps: HookDeps) {
 				state.pendingFallbackModel = undefined
 			}
 
-			const fallbackModels = getFallbackModelsForSession(
-				sessionID,
-				resolvedAgent,
-				deps.agentConfigs,
-				deps.globalFallbackModels
-			)
 			if (fallbackModels.length === 0) return
 
 			logInfo("Session fallback timeout reached", {
@@ -173,7 +282,8 @@ export function createAutoRetryHelpers(deps: HookDeps) {
 						plan.newModel,
 						resolvedAgent,
 						"session.timeout",
-						plan
+						plan,
+						preparedReplay
 					)
 				}
 			} finally {
@@ -189,7 +299,8 @@ export function createAutoRetryHelpers(deps: HookDeps) {
 		newModel: string,
 		resolvedAgent: string | undefined,
 		source: string,
-		plan?: FallbackPlan
+		plan?: FallbackPlan,
+		preparedReplay?: ReplaySelection
 	): Promise<boolean> => {
 		// Track whether we skipped because another handler owns the dispatch.
 		// In that case, the finally block must NOT clear sessionAwaitingFallbackResult.
@@ -535,60 +646,37 @@ export function createAutoRetryHelpers(deps: HookDeps) {
 			}
 
 			// ── NORMAL REPLAY DISPATCH PATH ──
-			const messagesResp = await ctx.client.session.messages({
-				path: { id: sessionID },
-				query: { directory: ctx.directory },
-			})
-			const msgs = messagesResp.data
-			if (!msgs || msgs.length === 0) {
-				logError(`No messages found in session for auto-retry (${source})`, { sessionID })
-			}
-
-			// Prefer replaying the last user message.  In child subagent sessions,
-			// the latest replayable prompt can be non-user (e.g. system/tool), so
-			// fall back to the last non-assistant message with parts.
 			//
-			// Skip messages that ONLY contain "compaction" type parts — these are
-			// compaction-internal messages that promptAsync cannot replay.  We need
-			// the real user message that preceded the compaction attempt.
-			let lastUserPartsRaw: any[] | undefined
-			let lastNonAssistantPartsRaw: any[] | undefined
-			// The id of the last user message we replay.  Passing it as the
-			// dispatch's messageID makes the runtime upsert that user message
-			// (prompt.ts: `id: input.messageID ?? MessageID.ascending()` plus
-			// `sessions.updateMessage(info)`) instead of minting a fresh one on
-			// every replay, which is what produced duplicate prompts.
-			let lastUserMessageID: string | undefined
-
-			for (let i = (msgs?.length ?? 0) - 1; i >= 0; i--) {
-				const m = msgs?.[i]
-				const role = ((m?.info?.role ?? (m as any)?.role ?? "") as string).toLowerCase()
-				const parts = m?.parts ?? (m?.info?.parts as any[] | undefined)
-				if (!parts || parts.length === 0) continue
-
-				// Skip compaction-only messages: parts where every part is
-				// type "compaction" (not replayable via promptAsync).
-				const hasOnlyCompactionParts = parts.every(
-					(p: any) => p.type === "compaction"
-				)
-				if (hasOnlyCompactionParts) continue
-
-				if (!lastNonAssistantPartsRaw && role !== "assistant") {
-					lastNonAssistantPartsRaw = parts
+			// The timeout path resolves the replayable message BEFORE aborting
+			// and passes it in, so the payload is guaranteed replayable and we
+			// re-use that pre-abort selection.  Every other source resolves it
+			// here, after its own abort/propagation handling.
+			let replaySelection: ReplaySelection | undefined
+			if (preparedReplay) {
+				replaySelection = preparedReplay
+			} else {
+				const messagesResp = await ctx.client.session.messages({
+					path: { id: sessionID },
+					query: { directory: ctx.directory },
+				})
+				const msgs = messagesResp.data
+				if (!msgs || msgs.length === 0) {
+					logError(`No messages found in session for auto-retry (${source})`, { sessionID })
 				}
-
-				if (role === "user") {
-					lastUserPartsRaw = parts
-					const messageID = (m?.info?.id ?? (m as any)?.id) as unknown
-					lastUserMessageID = typeof messageID === "string" && messageID.length > 0 ? messageID : undefined
-					break
-				}
+				replaySelection = selectReplayableMessage(msgs)
 			}
 
-			const replayPartsRaw = lastUserPartsRaw ?? lastNonAssistantPartsRaw
-			const replaySource = lastUserPartsRaw ? "last-user" : lastNonAssistantPartsRaw ? "last-non-assistant" : "none"
+			const replaySource = replaySelection?.source ?? "none"
 
-			if (replayPartsRaw && replayPartsRaw.length > 0) {
+			if (replaySelection && replaySelection.parts.length > 0) {
+				const allParts = replaySelection.parts
+				// The id of the replayed user message.  Passing it as the
+				// dispatch's messageID makes the runtime upsert that user message
+				// (prompt.ts: `id: input.messageID ?? MessageID.ascending()` plus
+				// `sessions.updateMessage(info)`) instead of minting a fresh one on
+				// every replay, which is what produced duplicate prompts.
+				const replayMessageID = replaySelection.messageID
+
 				// Second stale check: re-verify after all async work (abort + delay +
 				// message fetch).  Another handler may have advanced the state during
 				// any of the awaits above.
@@ -628,14 +716,6 @@ export function createAutoRetryHelpers(deps: HookDeps) {
 					replaySource,
 				})
 
-				// Cast raw parts to MessagePart (runtime parts may have any shape).
-				// Filter out "compaction" type parts — these are internal to
-				// OpenCode's compaction and not replayable via promptAsync.
-				const allParts: MessagePart[] = replayPartsRaw.filter(
-					(p): p is MessagePart =>
-						typeof p.type === "string" && p.type !== "compaction"
-				)
-
 				logInfo(`Prepared replay payload (${source})`, {
 					sessionID,
 					model: newModel,
@@ -661,7 +741,7 @@ export function createAutoRetryHelpers(deps: HookDeps) {
 								// upserts this turn instead of appending a new user
 								// message on every replay.  Omit the key entirely when
 								// no id is available (previous behaviour).
-								...(lastUserMessageID ? { messageID: lastUserMessageID } : {}),
+								...(replayMessageID ? { messageID: replayMessageID } : {}),
 								model: fallbackModelObj,
 								parts,
 							},
