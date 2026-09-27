@@ -27,6 +27,11 @@ export interface WaitOptions {
 	maxWaitMs?: number
 	/** Polling interval in milliseconds (only used as fallback for streaming check) */
 	pollIntervalMs?: number
+	/** When set, only assistant messages created at or after this epoch (ms)
+	 *  are eligible as the child's result.  Used to reject stale output that
+	 *  predates the fallback abort.  Messages without a known creation time
+	 *  are accepted for backward compatibility. */
+	sinceTimestamp?: number
 }
 
 /**
@@ -191,7 +196,7 @@ export async function waitForChildFallbackResult(
 	}
 
 	// Phase 3: Extract the assistant response
-	const result = await extractAssistantResponse(deps, childSessionID)
+	const result = await extractAssistantResponse(deps, childSessionID, options?.sinceTimestamp)
 	if (result) {
 		logInfo(`[subagent-sync] Got fallback result for ${childSessionID} (${Date.now() - startTime}ms)`)
 		return result
@@ -208,6 +213,7 @@ export async function waitForChildFallbackResult(
 async function extractAssistantResponse(
 	deps: HookDeps,
 	childSessionID: string,
+	sinceTimestamp?: number,
 ): Promise<string | null> {
 	try {
 		const msgs = await deps.ctx.client.session.messages({
@@ -217,9 +223,21 @@ async function extractAssistantResponse(
 
 		if (!msgs.data || msgs.data.length === 0) return null
 
-		// Find the last assistant message
+		// Find the last assistant message, optionally restricted to messages
+		// produced after the fallback abort so pre-abort partial output is not
+		// mistaken for the fallback result.
 		const lastAssistant = [...msgs.data].reverse().find(
-			(m) => m.info?.role === "assistant",
+			(m) => {
+				if (m.info?.role !== "assistant") return false
+				if (sinceTimestamp === undefined) return true
+				const created = (m.info as Record<string, unknown>)?.time
+				const createdMs =
+					typeof created === "object" && created !== null
+						? (created as Record<string, unknown>).created
+						: undefined
+				// Be permissive when the runtime omits the timestamp.
+				return typeof createdMs !== "number" || createdMs >= sinceTimestamp
+			},
 		)
 
 		if (!lastAssistant?.parts) return null

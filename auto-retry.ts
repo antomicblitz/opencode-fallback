@@ -5,6 +5,10 @@ import { prepareFallback, planFallback, commitFallback, createFallbackState } fr
 import { replayWithDegradation } from "./message-replay"
 
 const SESSION_TTL_MS = 30 * 60 * 1000
+/** How long a fallback-aborted child stays eligible for cancelled-task
+ *  recovery before its candidate is dropped.  Bounds the cache when the
+ *  parent never issues another request. */
+const RECOVERY_CANDIDATE_TTL_MS = 10 * 60 * 1000
 
 declare function setTimeout(
 	callback: () => void | Promise<void>,
@@ -159,7 +163,28 @@ export function createAutoRetryHelpers(deps: HookDeps) {
 	}
 
 	const abortSessionRequest = async (sessionID: string, source: string): Promise<void> => {
+		// Aborting a child session tears down the parent's task BackgroundJob
+		// (they share an id), so the parent's task tool reports "Task
+		// cancelled" while the plugin's fallback replay keeps the child alive.
+		// Record the child *before* the abort so the parent's next model
+		// request can be reconciled with the child's real result.  A user stop
+		// and our own duplicate-replay abort are genuine cancellations and must
+		// not be recovered.
+		const recordRecovery =
+			source !== "session.stop" && !source.startsWith("duplicate-replay")
 		try {
+			if (recordRecovery) {
+				const parentID = await getParentSessionID(sessionID)
+				if (parentID) {
+					deps.sessionRecoveryCandidates.set(sessionID, { abortedAt: Date.now() })
+					logInfo("Recorded child session for cancelled-task recovery", {
+						sessionID,
+						parentID,
+						source,
+					})
+				}
+			}
+
 			await ctx.client.session.abort({ path: { id: sessionID } })
 			deps.sessionSelfAbortTimestamp.set(sessionID, Date.now())
 			logInfo(`Aborted in-flight session request (${source})`, { sessionID })
@@ -908,6 +933,13 @@ export function createAutoRetryHelpers(deps: HookDeps) {
 	const cleanupStaleSessions = () => {
 		const now = Date.now()
 		let cleanedCount = 0
+
+		for (const [childSessionID, candidate] of deps.sessionRecoveryCandidates.entries()) {
+			if (now - candidate.abortedAt > RECOVERY_CANDIDATE_TTL_MS) {
+				deps.sessionRecoveryCandidates.delete(childSessionID)
+			}
+		}
+
 		for (const [sessionID, lastAccess] of sessionLastAccess.entries()) {
 			if (now - lastAccess > SESSION_TTL_MS) {
 				sessionStates.delete(sessionID)

@@ -51,6 +51,7 @@ function createMockDeps(overrides?: Partial<{
 		sessionIdleResolvers: new Map(),
 		sessionLastMessageTime: new Map(),
 		sessionCompactionInFlight: new Set(),
+		sessionRecoveryCandidates: new Map(),
 	}
 }
 
@@ -1371,6 +1372,58 @@ describe("auto-retry integration", () => {
 				// State committed
 				expect(state.currentModel).toBe("google/gemini-flash")
 				expect(state.failedModels.has("kimi-for-coding/k2p5")).toBe(true)
+			})
+		})
+
+		describe("#given abortSessionRequest on a child session", () => {
+			test("#then records a cancelled-task recovery candidate before aborting", async () => {
+				const deps = createMockDeps()
+				;(deps.ctx.client.session.get as any).mockImplementation(async () => ({
+					data: { parentID: "ses_parent_1" },
+				}))
+				const helpers = createAutoRetryHelpers(deps)
+
+				await helpers.abortSessionRequest("ses_child_1", "session.timeout")
+
+				expect(deps.ctx.client.session.abort).toHaveBeenCalled()
+				expect(deps.sessionRecoveryCandidates.has("ses_child_1")).toBe(true)
+				expect(deps.sessionRecoveryCandidates.get("ses_child_1")!.abortedAt).toBeGreaterThan(0)
+			})
+
+			test("#then does not record a candidate for a top-level session", async () => {
+				const deps = createMockDeps()
+				;(deps.ctx.client.session.get as any).mockImplementation(async () => ({
+					data: {},
+				}))
+				const helpers = createAutoRetryHelpers(deps)
+
+				await helpers.abortSessionRequest("ses_top_1", "session.timeout")
+
+				expect(deps.sessionRecoveryCandidates.has("ses_top_1")).toBe(false)
+			})
+
+			test("#then does not record a candidate for a user stop", async () => {
+				const deps = createMockDeps()
+				;(deps.ctx.client.session.get as any).mockImplementation(async () => ({
+					data: { parentID: "ses_parent_1" },
+				}))
+				const helpers = createAutoRetryHelpers(deps)
+
+				await helpers.abortSessionRequest("ses_child_1", "session.stop")
+
+				expect(deps.sessionRecoveryCandidates.has("ses_child_1")).toBe(false)
+			})
+
+			test("#then does not record a candidate for a duplicate replay abort", async () => {
+				const deps = createMockDeps()
+				;(deps.ctx.client.session.get as any).mockImplementation(async () => ({
+					data: { parentID: "ses_parent_1" },
+				}))
+				const helpers = createAutoRetryHelpers(deps)
+
+				await helpers.abortSessionRequest("ses_child_1", "duplicate-replay.session.status")
+
+				expect(deps.sessionRecoveryCandidates.has("ses_child_1")).toBe(false)
 			})
 		})
 

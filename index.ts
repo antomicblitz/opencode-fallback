@@ -12,6 +12,7 @@ import { createMessageUpdateHandler } from "./message-update-handler"
 import { createChatMessageHandler } from "./chat-message-handler"
 import { normalizeFallbackModelsField } from "./config-reader"
 import { isEmptyTaskResult, extractChildSessionID, waitForChildFallbackResult } from "./subagent-result-sync"
+import { recoverCancelledTaskParts, type TransformerMessage } from "./cancelled-task-recovery"
 import { readFileSync, existsSync } from "fs"
 import { join } from "path"
 import { parse as parseJsonc } from "jsonc-parser"
@@ -122,6 +123,7 @@ export default async function OpenCodeFallbackPlugin(
 		sessionIdleResolvers: new Map(),
 		sessionLastMessageTime: new Map(),
 		sessionCompactionInFlight: new Set(),
+		sessionRecoveryCandidates: new Map(),
 	}
 
 	const helpers = createAutoRetryHelpers(deps)
@@ -245,6 +247,25 @@ export default async function OpenCodeFallbackPlugin(
 					childSession: childSessionID,
 				})
 			}
+		},
+
+		"experimental.chat.messages.transform": async (
+			_input: Record<string, never>,
+			output: { messages: TransformerMessage[] }
+		) => {
+			if (!deps.config.enabled) return
+
+			// Repair a false "Task cancelled" left by aborting a child session
+			// for fallback.  This runs just before the parent's model request,
+			// so the parent sees the subagent's real result instead of acting
+			// on a cancellation while the child is still running.
+			await recoverCancelledTaskParts(deps, output?.messages, {
+				maxWaitMs: Math.min(
+					(deps.config.timeout_seconds || 120) * 1000,
+					120_000,
+				),
+				pollIntervalMs: 500,
+			})
 		},
 
 		"chat.message": async (
