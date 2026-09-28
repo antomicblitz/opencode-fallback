@@ -490,3 +490,32 @@ describe("MessageAbortedError self-abort suppression", () => {
 		})
 	})
 })
+
+describe("local-provider compaction pre-emption", () => {
+	async function runCompaction(model: string) {
+		const deps = createMockDeps()
+		const helpers = createMockHelpers()
+		const sessionID = "ses_local_compaction"
+		deps.globalFallbackModels = ["deepseek/deepseek-flash"]
+		deps.sessionStates.set(sessionID, createFallbackState(model))
+		deps.sessionFirstTokenReceived.set(sessionID, true)
+
+		const handler = createMessageUpdateHandler(deps, helpers)
+		await handler({
+			info: { sessionID, role: "assistant", agent: "compaction", model },
+			parts: [],
+		})
+		await new Promise((r) => globalThis.setTimeout(r, 0))
+		return { helpers, sessionID }
+	}
+
+	test("#given a compaction on a local provider #then the chain advances immediately", async () => {
+		const { helpers, sessionID } = await runCompaction("llamacpp-beast/qwen3.8-flash-next-think-solo")
+		expect(helpers.scheduleSessionFallbackTimeout).toHaveBeenCalledWith(sessionID, undefined, 0)
+	})
+
+	test("#given a compaction on a hosted provider #then the normal TTFT budget applies", async () => {
+		const { helpers, sessionID } = await runCompaction("openai/gpt-5.6-luna")
+		expect(helpers.scheduleSessionFallbackTimeout).toHaveBeenCalledWith(sessionID, undefined, undefined)
+	})
+})

@@ -204,11 +204,18 @@ export function createAutoRetryHelpers(deps: HookDeps) {
 		}
 	}
 
-	const scheduleSessionFallbackTimeout = (sessionID: string, resolvedAgent?: string) => {
+	const scheduleSessionFallbackTimeout = (
+		sessionID: string,
+		resolvedAgent?: string,
+		timeoutMsOverride?: number
+	) => {
 		clearSessionFallbackTimeout(sessionID)
 
-		const timeoutMs = config.timeout_seconds * 1000
-		if (timeoutMs <= 0) return
+		// An override of 0 means "advance the chain now" — used when the current
+		// model is known to be too slow for this request (see localProviders).
+		const fromConfig = timeoutMsOverride === undefined
+		if (fromConfig && config.timeout_seconds <= 0) return
+		const timeoutMs = fromConfig ? config.timeout_seconds * 1000 : Math.max(0, timeoutMsOverride)
 
 		const timer = setTimeout(async () => {
 			sessionFallbackTimeouts.delete(sessionID)

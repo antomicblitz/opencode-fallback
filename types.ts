@@ -26,6 +26,13 @@ export interface FallbackPluginConfig {
 	timeout_seconds?: number
 	notify_on_fallback?: boolean
 	fallback_models?: string | string[]
+	/** Providers whose prefill is far too slow to compact a large session inside
+	 *  `timeout_seconds`. A compaction run on one of these is switched to the
+	 *  fallback chain immediately instead of waiting out the full TTFT budget;
+	 *  a local model can need ~10 minutes to prefill a full window, so waiting
+	 *  only delays the switch and leaves the session marked failed in between.
+	 *  Provider ids match the `providerID` in `provider/model`. */
+	local_providers?: string[]
 }
 
 export interface FallbackState {

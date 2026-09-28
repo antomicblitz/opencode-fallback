@@ -17,6 +17,7 @@ export const DEFAULT_CONFIG: Required<FallbackPluginConfig> = {
 	timeout_seconds: 30,
 	notify_on_fallback: true,
 	fallback_models: [],
+	local_providers: ["llamacpp-beast", "ollama"],
 }
 
 export const RETRYABLE_ERROR_PATTERNS = [

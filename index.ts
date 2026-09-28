@@ -98,6 +98,10 @@ export default async function OpenCodeFallbackPlugin(
 				configOverrides?.fallback_models ??
 				fileConfig?.fallback_models ??
 				DEFAULT_CONFIG.fallback_models,
+			local_providers:
+				configOverrides?.local_providers ??
+				fileConfig?.local_providers ??
+				DEFAULT_CONFIG.local_providers,
 		}
 
 		return mergedConfig
