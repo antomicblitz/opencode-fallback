@@ -231,6 +231,10 @@ export function createAutoRetryHelpers(deps: HookDeps) {
 		const fromConfig = timeoutMsOverride === undefined
 		if (fromConfig && config.timeout_seconds <= 0) return
 		const timeoutMs = fromConfig ? config.timeout_seconds * 1000 : Math.max(0, timeoutMsOverride)
+		// When this timer was armed.  Guard 3 below uses it to tell a child
+		// subagent that is still streaming (activity since arming) from one
+		// that went quiet before the parent did.
+		const armedAt = Date.now()
 
 		const timer = setTimeout(async () => {
 			sessionFallbackTimeouts.delete(sessionID)
@@ -254,6 +258,119 @@ export function createAutoRetryHelpers(deps: HookDeps) {
 				return
 			}
 
+			// ── STAND-DOWN GUARDS ──
+			// The TTFT timer must only abort a session that is genuinely
+			// waiting on a model's first token.  Three states look like
+			// silence but are not a stalled model, and aborting in them
+			// destroys live work: session.abort cascades into child
+			// sessions, so the abort kills a running subagent mid-command
+			// ("User aborted the command") with no recovery (observed
+			// 2026-09-28T13:49:17Z: a stale timer on an idle orchestrator
+			// cancelled ses_f17be46b7ffeZ8nhBPqY7fCee1 mid-pytest).
+			//
+			// Fetch the messages once; the fetch is shared with the replay
+			// selection below.  A failed fetch must not abort — the same
+			// fail-safe as an un-replayable message applies.
+			let sessionMessages: RawSessionMessage[] | undefined
+			try {
+				const messagesResp = await ctx.client.session.messages({
+					path: { id: sessionID },
+					query: { directory: ctx.directory },
+				})
+				sessionMessages = messagesResp.data ?? []
+			} catch (error) {
+				logError("Failed to inspect session messages before timeout abort", {
+					sessionID,
+					error: String(error),
+				})
+				scheduleSessionFallbackTimeout(sessionID, resolvedAgent)
+				return
+			}
+
+			// Guard 1 — tool execution in flight: the last assistant message
+			// still carries a running/pending tool part (a long bash command
+			// or a foreground task subagent).  The loop is inside tool
+			// execution, so no model request is in flight; the timer was
+			// armed by the tool part's own message.updated.
+			const lastAssistant = [...sessionMessages]
+				.reverse()
+				.find(
+					(m) =>
+						((m?.info?.role ?? (m as any)?.role ?? "") as string).toLowerCase() ===
+						"assistant",
+				)
+			const assistantParts = (lastAssistant?.parts ??
+				(lastAssistant?.info?.parts as any[] | undefined) ??
+				[]) as Array<Record<string, any>>
+			const runningTool = assistantParts.find(
+				(p) =>
+					p?.type === "tool" &&
+					(p?.state?.status === "running" || p?.state?.status === "pending"),
+			)
+			if (runningTool) {
+				logInfo(
+					"Timeout fired while a tool call is still running; standing down instead of aborting",
+					{ sessionID, tool: runningTool.tool },
+				)
+				scheduleSessionFallbackTimeout(sessionID, resolvedAgent)
+				return
+			}
+
+			// Guard 2 — idle session: the turn already completed (e.g. it
+			// ended by dispatching a background task subagent) and a
+			// trailing message.updated raced session.idle's cleanup to
+			// re-arm this timer.  An idle session has no request to abort.
+			try {
+				const sessionResp = await ctx.client.session.get({ path: { id: sessionID } })
+				const sessionData = (sessionResp?.data ?? sessionResp) as
+					| Record<string, unknown>
+					| undefined
+				const rawStatus = sessionData?.status
+				const statusType =
+					typeof rawStatus === "string"
+						? rawStatus
+						: ((rawStatus as Record<string, unknown> | undefined)?.type as
+								| string
+								| undefined)
+				if (statusType === "idle") {
+					logInfo(
+						"Timeout fired while the session is idle (no model request in flight); standing down instead of aborting",
+						{ sessionID },
+					)
+					scheduleSessionFallbackTimeout(sessionID, resolvedAgent)
+					return
+				}
+			} catch (error) {
+				logError("Failed to read session status before timeout abort", {
+					sessionID,
+					error: String(error),
+				})
+				scheduleSessionFallbackTimeout(sessionID, resolvedAgent)
+				return
+			}
+
+			// Guard 3 — active child session: a background task subagent is
+			// still producing messages (activity since this timer was
+			// armed).  Aborting the parent cancels the child mid-command, so
+			// stand down while the child works; the re-armed timer retries
+			// once the child goes quiet.
+			for (const [childSessionID, parentID] of deps.sessionParentID.entries()) {
+				if (parentID !== sessionID) continue
+				const lastActivity = deps.sessionLastMessageTime.get(childSessionID)
+				if (lastActivity !== undefined && lastActivity >= armedAt) {
+					logInfo(
+						"Timeout fired while a child subagent session is still active; standing down instead of aborting",
+						{
+							sessionID,
+							childSessionID,
+							msSinceChildActivity: Date.now() - lastActivity,
+						},
+					)
+					scheduleSessionFallbackTimeout(sessionID, resolvedAgent)
+					return
+				}
+			}
+
 			// Determine the replayable message BEFORE aborting.  Aborting a
 			// request that we cannot replay kills the turn silently — no
 			// recovery, no user-visible answer — which is worse than a slow
@@ -268,19 +385,7 @@ export function createAutoRetryHelpers(deps: HookDeps) {
 
 			let preparedReplay: ReplaySelection | undefined
 			if (fallbackModels.length > 0 && resolvedAgent !== "compaction") {
-				try {
-					const messagesResp = await ctx.client.session.messages({
-						path: { id: sessionID },
-						query: { directory: ctx.directory },
-					})
-					preparedReplay = selectReplayableMessage(messagesResp.data)
-				} catch (error) {
-					logError("Failed to inspect session for a replayable message", {
-						sessionID,
-						error: String(error),
-					})
-					preparedReplay = undefined
-				}
+				preparedReplay = selectReplayableMessage(sessionMessages)
 
 				if (!preparedReplay) {
 					logInfo(
@@ -738,7 +843,38 @@ export function createAutoRetryHelpers(deps: HookDeps) {
 				// (prompt.ts: `id: input.messageID ?? MessageID.ascending()` plus
 				// `sessions.updateMessage(info)`) instead of minting a fresh one on
 				// every replay, which is what produced duplicate prompts.
-				const replayMessageID = replaySelection.messageID
+				let replayMessageID = replaySelection.messageID
+
+				// The abort that preceded this dispatch can remove the pending
+				// user message (the runtime reverts the unconfirmed turn).
+				// Upserting the removed id then silently swallows the replay:
+				// the loop sees the previous completed assistant message and
+				// exits at step 0, leaving the session idle until the user
+				// manually re-sends the prompt (observed 2026-09-28T22:35:27Z
+				// as a duplicated "Continue").  If the replayed message no
+				// longer exists, drop the id so the runtime mints a fresh user
+				// message the loop will actually process.
+				if (replayMessageID) {
+					try {
+						const currentResp = await ctx.client.session.messages({
+							path: { id: sessionID },
+							query: { directory: ctx.directory },
+						})
+						const stillExists = (currentResp.data ?? []).some(
+							(m) =>
+								((m?.info?.id ?? (m as any)?.id) as unknown) === replayMessageID,
+						)
+						if (!stillExists) {
+							logInfo(
+								"Replayed user message was removed by the abort; dispatching a fresh message",
+								{ sessionID, messageID: replayMessageID },
+							)
+							replayMessageID = undefined
+						}
+					} catch {
+						// Keep the id when the check fails; behaviour unchanged.
+					}
+				}
 
 				// Second stale check: re-verify after all async work (abort + delay +
 				// message fetch).  Another handler may have advanced the state during

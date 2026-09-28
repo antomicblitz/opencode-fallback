@@ -399,6 +399,207 @@ describe("auto-retry integration", () => {
 		})
 	})
 
+	describe("#given a session.timeout while a tool call is still running", () => {
+		describe("#when the timeout fires", () => {
+			test("#then it does not abort and re-arms the timeout", async () => {
+				const deps = createMockDeps({
+					messagesData: [
+						{
+							info: { role: "user", id: "msg_user_toolbusy" },
+							parts: [{ type: "text", text: "delegate the fix" }],
+						},
+						{
+							info: { role: "assistant", id: "msg_asst_toolbusy" },
+							parts: [
+								{
+									type: "tool",
+									tool: "task",
+									state: { status: "running", input: {} },
+								},
+							],
+						},
+					],
+				})
+				deps.config.timeout_seconds = 0.02
+				deps.globalFallbackModels = ["openai/gpt-4o"]
+				const sessionID = "ses_toolbusy_timeout"
+				const { createFallbackState } = await import("./fallback-state")
+				const state = createFallbackState("anthropic/claude-opus-4-6")
+				deps.sessionStates.set(sessionID, state)
+				deps.sessionFirstTokenReceived.set(sessionID, false)
+
+				const helpers = createAutoRetryHelpers(deps)
+				helpers.scheduleSessionFallbackTimeout(sessionID)
+
+				await new Promise((r) => globalThis.setTimeout(r, 100))
+
+				// The loop is executing a tool (e.g. a foreground task
+				// subagent); no model request is in flight, so the abort
+				// (which cascades into child sessions) must not fire.
+				expect(deps.ctx.client.session.abort).not.toHaveBeenCalled()
+				expect(deps.ctx.client.session.promptAsync).not.toHaveBeenCalled()
+				expect(deps.sessionFallbackTimeouts.has(sessionID)).toBe(true)
+				expect(readFileSync(getLogFilePath(), "utf-8")).toContain(
+					"Timeout fired while a tool call is still running; standing down instead of aborting"
+				)
+
+				helpers.clearSessionFallbackTimeout(sessionID)
+			})
+		})
+	})
+
+	describe("#given a session.timeout while the session is idle", () => {
+		describe("#when the timeout fires", () => {
+			test("#then it does not abort and re-arms the timeout", async () => {
+				const deps = createMockDeps({
+					messagesData: [
+						{
+							info: { role: "user", id: "msg_user_idle" },
+							parts: [{ type: "text", text: "hello" }],
+						},
+					],
+				})
+				;(deps.ctx.client.session.get as any).mockImplementation(async () => ({
+					data: { status: { type: "idle" } },
+				}))
+				deps.config.timeout_seconds = 0.02
+				deps.globalFallbackModels = ["openai/gpt-4o"]
+				const sessionID = "ses_idle_timeout"
+				const { createFallbackState } = await import("./fallback-state")
+				const state = createFallbackState("anthropic/claude-opus-4-6")
+				deps.sessionStates.set(sessionID, state)
+				deps.sessionFirstTokenReceived.set(sessionID, false)
+
+				const helpers = createAutoRetryHelpers(deps)
+				helpers.scheduleSessionFallbackTimeout(sessionID)
+
+				await new Promise((r) => globalThis.setTimeout(r, 100))
+
+				// The turn completed (e.g. it dispatched a background task
+				// subagent); a trailing message.updated raced session.idle's
+				// cleanup to re-arm this timer.  An idle session has no
+				// in-flight request to abort.
+				expect(deps.ctx.client.session.abort).not.toHaveBeenCalled()
+				expect(deps.ctx.client.session.promptAsync).not.toHaveBeenCalled()
+				expect(deps.sessionFallbackTimeouts.has(sessionID)).toBe(true)
+				expect(readFileSync(getLogFilePath(), "utf-8")).toContain(
+					"Timeout fired while the session is idle (no model request in flight); standing down instead of aborting"
+				)
+
+				helpers.clearSessionFallbackTimeout(sessionID)
+			})
+		})
+	})
+
+	describe("#given a session.timeout while a child subagent is active", () => {
+		describe("#when the timeout fires", () => {
+			test("#then it does not abort and re-arms the timeout", async () => {
+				const deps = createMockDeps({
+					messagesData: [
+						{
+							info: { role: "user", id: "msg_user_child" },
+							parts: [{ type: "text", text: "hello" }],
+						},
+					],
+				})
+				deps.config.timeout_seconds = 0.02
+				deps.globalFallbackModels = ["openai/gpt-4o"]
+				const sessionID = "ses_parent_timeout"
+				const { createFallbackState } = await import("./fallback-state")
+				const state = createFallbackState("anthropic/claude-opus-4-6")
+				deps.sessionStates.set(sessionID, state)
+				deps.sessionFirstTokenReceived.set(sessionID, false)
+				deps.sessionParentID.set("ses_child_active", sessionID)
+
+				const helpers = createAutoRetryHelpers(deps)
+				helpers.scheduleSessionFallbackTimeout(sessionID)
+				// The background subagent streams while the parent's timer
+				// runs — each re-armed timer sees fresh child activity.
+				const childStream = setInterval(() => {
+					deps.sessionLastMessageTime.set("ses_child_active", Date.now())
+				}, 10)
+
+				try {
+					await new Promise((r) => globalThis.setTimeout(r, 100))
+				} finally {
+					clearInterval(childStream)
+				}
+
+				// Aborting the parent cancels the child mid-command, so the
+				// timer stands down while the child is producing messages.
+				expect(deps.ctx.client.session.abort).not.toHaveBeenCalled()
+				expect(deps.ctx.client.session.promptAsync).not.toHaveBeenCalled()
+				expect(deps.sessionFallbackTimeouts.has(sessionID)).toBe(true)
+				expect(readFileSync(getLogFilePath(), "utf-8")).toContain(
+					"Timeout fired while a child subagent session is still active; standing down instead of aborting"
+				)
+
+				helpers.clearSessionFallbackTimeout(sessionID)
+			})
+		})
+	})
+
+	describe("#given a fallback replay whose user message was removed by the abort", () => {
+		describe("#when the timeout fires", () => {
+			test("#then dispatches a fresh message instead of upserting the removed id", async () => {
+				const sessionID = "ses_replay_removed"
+				const promptCalls: any[] = []
+				const deps = createMockDeps({
+					messagesData: [],
+				})
+				// First fetch (pre-abort replay selection) still sees the
+				// user message; the fetch after the abort sees it removed —
+				// the runtime reverted the unconfirmed turn.
+				let messagesCallCount = 0
+				;(deps.ctx.client.session.messages as any).mockImplementation(async () => {
+					messagesCallCount++
+					if (messagesCallCount === 1) {
+						return {
+							data: [
+								{
+									info: { role: "user", id: "msg_user_removed" },
+									parts: [{ type: "text", text: "Continue" }],
+								},
+							],
+						}
+					}
+					return { data: [] }
+				})
+				;(deps.ctx.client.session.get as any).mockImplementation(async () => ({
+					data: { status: { type: "busy" } },
+				}))
+				;(deps.ctx.client.session.promptAsync as any).mockImplementation(
+					async (args: any) => {
+						promptCalls.push(args)
+						deps.sessionFirstTokenReceived.set(sessionID, true)
+					},
+				)
+				deps.config.timeout_seconds = 0.02
+				deps.globalFallbackModels = ["anthropic/claude-opus-4-6", "openai/gpt-4o"]
+				const { createFallbackState } = await import("./fallback-state")
+				const state = createFallbackState("anthropic/claude-opus-4-6")
+				deps.sessionStates.set(sessionID, state)
+				deps.sessionFirstTokenReceived.set(sessionID, false)
+
+				const helpers = createAutoRetryHelpers(deps)
+				helpers.scheduleSessionFallbackTimeout(sessionID)
+
+				await new Promise((r) => globalThis.setTimeout(r, 350))
+
+				expect(deps.ctx.client.session.abort).toHaveBeenCalled()
+				expect(promptCalls.length).toBe(1)
+				// Upserting the removed message id silently swallows the
+				// replay (the loop exits at step 0 and the user must
+				// re-send the prompt manually); a fresh message must be
+				// minted instead.
+				expect(promptCalls[0].body.messageID).toBeUndefined()
+				expect(promptCalls[0].body.parts[0].text).toBe("Continue")
+
+				helpers.clearSessionFallbackTimeout(sessionID)
+			})
+		})
+	})
+
 	describe("#given model still in-flight (status-triggered source)", () => {
 		describe("#when source is session.status", () => {
 			test("#then abort IS called to stop the in-flight request", async () => {
