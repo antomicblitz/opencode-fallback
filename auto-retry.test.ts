@@ -1375,6 +1375,41 @@ describe("auto-retry integration", () => {
 			})
 		})
 
+		describe("#when agent is 'compaction' and the compaction agent pins a model", () => {
+			test("#then it stops instead of re-dispatching on a model the pin overrides", async () => {
+				const deps = createMockDeps()
+				deps.agentConfigs = { compaction: { model: "deepseek/deepseek-flash" } }
+
+				const { createFallbackState } = await import("./fallback-state")
+				const state = createFallbackState("deepseek/deepseek-flash")
+				deps.sessionStates.set("ses_pinned", state)
+				deps.globalFallbackModels = [
+					"deepseek/deepseek-flash",
+					"openrouter/~deepseek/deepseek-flash-latest",
+				]
+
+				const helpers = createAutoRetryHelpers(deps)
+				const result = await helpers.autoRetryWithFallback(
+					"ses_pinned",
+					"openrouter/~deepseek/deepseek-flash-latest",
+					"compaction",
+					"session.timeout",
+					{
+						success: true as const,
+						newModel: "openrouter/~deepseek/deepseek-flash-latest",
+						failedModel: "deepseek/deepseek-flash",
+						newFallbackIndex: 1,
+					}
+				)
+
+				// The summarize payload's model is ignored while agent.compaction
+				// pins one, so re-dispatching would loop on the failing model.
+				expect(result).toBe(false)
+				expect(deps.ctx.client.session.summarize).not.toHaveBeenCalled()
+				expect(deps.ctx.client.session.promptAsync).not.toHaveBeenCalled()
+			})
+		})
+
 		describe("#given abortSessionRequest on a child session", () => {
 			test("#then records a cancelled-task recovery candidate before aborting", async () => {
 				const deps = createMockDeps()
