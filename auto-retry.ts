@@ -21,6 +21,21 @@ declare function clearTimeout(timeout: ReturnType<typeof globalThis.setTimeout>)
 // because OpenCode's abort is session-wide and takes time to fully propagate.
 const POST_ABORT_DELAY_MS = 150
 
+/** The compaction agent's configured model, when it has one.
+ *
+ *  The runtime resolves the compaction model as `agent.compaction.model ??
+ *  userMessage.model` (packages/opencode/src/session/compaction.ts), and no
+ *  plugin hook can change it afterwards (the agent map is built once per
+ *  instance; `config.update` does not rebuild it). So when the agent pins a
+ *  model, every `session.summarize` re-dispatch we make runs on that same pin
+ *  no matter which model we pass — retrying only re-runs a failing model in a
+ *  loop. Callers use this to stop instead of looping. */
+function compactionModelPin(agentConfigs: Record<string, unknown> | undefined): string | undefined {
+	const compaction = agentConfigs?.compaction as { model?: unknown } | undefined
+	const model = compaction?.model
+	return typeof model === "string" && model.length > 0 ? model : undefined
+}
+
 function summarizeParts(parts: MessagePart[] | undefined): {
 	count: number
 	types: string[]
@@ -451,6 +466,22 @@ export function createAutoRetryHelpers(deps: HookDeps) {
 			// abort the stuck session and wait for it to settle, then call
 			// summarize with the fallback model.
 			if (resolvedAgent === "compaction") {
+				// A pinned compaction model cannot be switched by a summarize
+				// re-dispatch, so retrying would loop on the same failing model
+				// (observed 2026-09-25: 31s compaction → luna → abort → luna).
+				// Stop here; the runtime retries compaction on its own cadence.
+				const pinnedCompaction = compactionModelPin(deps.agentConfigs)
+				if (pinnedCompaction) {
+					logInfo("Compaction is pinned to a fixed model; failover cannot switch it — skipping re-dispatch", {
+						sessionID,
+						pinned: pinnedCompaction,
+						failedModel: plan?.failedModel,
+						newModel,
+						source,
+					})
+					return false
+				}
+
 				const failedModel = plan?.failedModel
 				logInfo(`Compaction fallback: abort + summarize on fallback (${source})`, {
 					sessionID,
