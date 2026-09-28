@@ -127,7 +127,16 @@ All fields are optional — omit any you want to keep at the default.
   // fallback_models in opencode.json.
   // Accepts a string (single model) or an array of strings.
   // Default: []
-  "fallback_models": []
+  "fallback_models": [],
+
+  // Providers whose prefill is too slow to finish a compaction inside
+  // timeout_seconds. A compaction run on one of these providers advances to
+  // the fallback chain immediately instead of waiting out the full TTFT
+  // budget: a local model can need ~10 minutes to prefill a full window, so
+  // waiting only delays the switch and leaves the session marked failed in
+  // between. Provider ids match the providerID in provider/model.
+  // Default: ["llamacpp-beast", "ollama"]
+  "local_providers": ["llamacpp-beast", "ollama"]
 }
 ```
 
@@ -166,7 +175,7 @@ Primary model fails (rate limit, quota, model not found, …)
 
 **Subagent task recovery** — OpenCode runs each `task` subagent as a background job whose id is the child session id. Aborting a child for a fallback therefore also cancels the parent's task job, making the task tool hand the parent a premature `"Task cancelled"` error while the plugin replays the child on the fallback model. Before the parent's next model request, the plugin waits for that child to produce its real result and rewrites the cancelled task part into the completed result, so the parent reasons on the subagent's output instead of a false cancellation.
 
-**Compaction-aware fallback** — when `/compact` fails, the plugin detects compaction by checking the `agent: "compaction"` field and retries via `session.command` instead of `promptAsync` (compaction messages contain parts that `promptAsync` cannot accept). Fallback models are resolved per-agent — configure a `"compaction"` agent in your fallback config, or fall back to the global chain. Toast notifications fire on compaction fallback trigger and when all fallback models are exhausted. The same TTFT timeout applies: compaction streaming produces `compaction_delta` events that keep the timer alive just like normal chat tokens. When compaction completes successfully, the plugin clears all fallback tracking state via the `session.compacted` event.
+**Compaction-aware fallback** — when `/compact` fails, the plugin detects compaction by checking the `agent: "compaction"` field and retries via `session.command` instead of `promptAsync` (compaction messages contain parts that `promptAsync` cannot accept). Fallback models are resolved per-agent — configure a `"compaction"` agent in your fallback config, or fall back to the global chain. Toast notifications fire on compaction fallback trigger and when all fallback models are exhausted. The same TTFT timeout applies: compaction streaming produces `compaction_delta` events that keep the timer alive just like normal chat tokens. When compaction completes successfully, the plugin clears all fallback tracking state via the `session.compacted` event. A compaction run on a provider listed in `local_providers` skips the TTFT wait entirely and advances to the fallback chain immediately, because local prefill cannot complete a large compaction inside the budget.
 
 ---
 

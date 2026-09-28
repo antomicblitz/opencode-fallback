@@ -226,12 +226,29 @@ export function createMessageUpdateHandler(deps: HookDeps, helpers: AutoRetryHel
 								deps.globalFallbackModels
 							)
 							if (fallbackModels.length > 0) {
-								helpers.scheduleSessionFallbackTimeout(sessionID, resolvedAgent)
-								logInfo("Scheduled primary model TTFT timeout", {
+								// A compaction run on a local provider can never finish
+								// inside the TTFT budget: local prefill is far too slow
+								// for a large window, so waiting only leaves the session
+								// marked failed until the budget expires. Advance the
+								// chain immediately instead.
+								const localProvider = model?.split("/")[0]
+								const isLocalCompaction =
+									eventAgent === "compaction" &&
+									!!localProvider &&
+									config.local_providers.includes(localProvider)
+								helpers.scheduleSessionFallbackTimeout(
 									sessionID,
-									model,
-									timeoutSeconds: config.timeout_seconds,
-								})
+									resolvedAgent,
+									isLocalCompaction ? 0 : undefined
+								)
+								logInfo(
+									isLocalCompaction
+										? "Compaction on a local provider — advancing the fallback chain immediately"
+										: "Scheduled primary model TTFT timeout",
+									isLocalCompaction
+										? { sessionID, model, localProvider }
+										: { sessionID, model, timeoutSeconds: config.timeout_seconds }
+								)
 							}
 						})
 						.catch(() => {})
