@@ -179,6 +179,15 @@ export interface PluginContext {
 			get: (args: {
 				path: { id: string }
 			}) => Promise<{ data?: Record<string, unknown> }>
+			/** Live per-session run status (`GET /session/status`, SDK
+			 *  `session.status`).  The session record from `get` carries no
+			 *  status field; this map is its only source.  The runtime stores
+			 *  only non-idle entries (`SessionStatus.set({type:"idle"})`
+			 *  deletes), so a missing session id means idle.  Optional so
+			 *  fixtures need not provide it. */
+			status?: (args: {
+				query: { directory: string }
+			}) => Promise<{ data?: Record<string, { type?: string }> }>
 		}
 		tui: {
 			showToast: (args: {

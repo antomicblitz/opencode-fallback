@@ -31,6 +31,9 @@ function createMockDeps(overrides?: Partial<{
 					revert: mock(async () => {}),
 					summarize: mock(async () => ({ data: true })),
 					get: mock(async () => ({ data: {} })),
+					// Live run status: the runtime returns only non-idle
+					// sessions; a missing id means idle.  Empty = all idle.
+					status: mock(async () => ({ data: {} })),
 				},
 				tui: {
 					showToast: mock(showToastFn as any),
@@ -338,6 +341,10 @@ describe("auto-retry integration", () => {
 				const state = createFallbackState("anthropic/claude-opus-4-6")
 				deps.sessionStates.set(sessionID, state)
 				deps.sessionFirstTokenReceived.set(sessionID, false)
+				// A genuinely stalled request: the runner is busy.
+				;(deps.ctx.client.session.status as any).mockImplementation(async () => ({
+					data: { [sessionID]: { type: "busy" } },
+				}))
 
 				const helpers = createAutoRetryHelpers(deps)
 				helpers.scheduleSessionFallbackTimeout(sessionID)
@@ -383,6 +390,10 @@ describe("auto-retry integration", () => {
 				const state = createFallbackState("anthropic/claude-opus-4-6")
 				deps.sessionStates.set(sessionID, state)
 				deps.sessionFirstTokenReceived.set(sessionID, false)
+				// A genuinely stalled request: the runner is busy.
+				;(deps.ctx.client.session.status as any).mockImplementation(async () => ({
+					data: { [sessionID]: { type: "busy" } },
+				}))
 
 				const helpers = createAutoRetryHelpers(deps)
 				helpers.scheduleSessionFallbackTimeout(sessionID)
@@ -427,6 +438,11 @@ describe("auto-retry integration", () => {
 				const state = createFallbackState("anthropic/claude-opus-4-6")
 				deps.sessionStates.set(sessionID, state)
 				deps.sessionFirstTokenReceived.set(sessionID, false)
+				// The runner is busy executing the tool (status "busy"), so
+				// only Guard 1 can tell this apart from a stalled request.
+				;(deps.ctx.client.session.status as any).mockImplementation(async () => ({
+					data: { [sessionID]: { type: "busy" } },
+				}))
 
 				const helpers = createAutoRetryHelpers(deps)
 				helpers.scheduleSessionFallbackTimeout(sessionID)
@@ -450,7 +466,7 @@ describe("auto-retry integration", () => {
 
 	describe("#given a session.timeout while the session is idle", () => {
 		describe("#when the timeout fires", () => {
-			test("#then it does not abort and re-arms the timeout", async () => {
+			test("#then it does not abort and clears the timer", async () => {
 				const deps = createMockDeps({
 					messagesData: [
 						{
@@ -459,9 +475,8 @@ describe("auto-retry integration", () => {
 						},
 					],
 				})
-				;(deps.ctx.client.session.get as any).mockImplementation(async () => ({
-					data: { status: { type: "idle" } },
-				}))
+				// GET /session/status lists only non-idle sessions; an absent
+				// parent id means the turn completed.
 				deps.config.timeout_seconds = 0.02
 				deps.globalFallbackModels = ["openai/gpt-4o"]
 				const sessionID = "ses_idle_timeout"
@@ -478,15 +493,14 @@ describe("auto-retry integration", () => {
 				// The turn completed (e.g. it dispatched a background task
 				// subagent); a trailing message.updated raced session.idle's
 				// cleanup to re-arm this timer.  An idle session has no
-				// in-flight request to abort.
+				// in-flight request to abort, and no re-arm is needed — the
+				// next real prompt arms a fresh timer.
 				expect(deps.ctx.client.session.abort).not.toHaveBeenCalled()
 				expect(deps.ctx.client.session.promptAsync).not.toHaveBeenCalled()
-				expect(deps.sessionFallbackTimeouts.has(sessionID)).toBe(true)
+				expect(deps.sessionFallbackTimeouts.has(sessionID)).toBe(false)
 				expect(readFileSync(getLogFilePath(), "utf-8")).toContain(
 					"Timeout fired while the session is idle (no model request in flight); standing down instead of aborting"
 				)
-
-				helpers.clearSessionFallbackTimeout(sessionID)
 			})
 		})
 	})
@@ -510,6 +524,11 @@ describe("auto-retry integration", () => {
 				deps.sessionStates.set(sessionID, state)
 				deps.sessionFirstTokenReceived.set(sessionID, false)
 				deps.sessionParentID.set("ses_child_active", sessionID)
+				// Parent busy; the child is not in the status map, so only the
+				// message-activity fallback can see it.
+				;(deps.ctx.client.session.status as any).mockImplementation(async () => ({
+					data: { [sessionID]: { type: "busy" } },
+				}))
 
 				const helpers = createAutoRetryHelpers(deps)
 				helpers.scheduleSessionFallbackTimeout(sessionID)
@@ -539,6 +558,55 @@ describe("auto-retry integration", () => {
 		})
 	})
 
+	describe("#given a session.timeout while a child subagent runs a long tool", () => {
+		describe("#when the timeout fires", () => {
+			test("#then the status map stands it down even with no child message activity", async () => {
+				const deps = createMockDeps({
+					messagesData: [
+						{
+							info: { role: "user", id: "msg_user_child_tool" },
+							parts: [{ type: "text", text: "run the suite" }],
+						},
+					],
+				})
+				deps.config.timeout_seconds = 0.02
+				deps.globalFallbackModels = ["openai/gpt-4o"]
+				const sessionID = "ses_parent_child_tool"
+				const childID = "ses_child_long_tool"
+				const { createFallbackState } = await import("./fallback-state")
+				const state = createFallbackState("anthropic/claude-opus-4-6")
+				deps.sessionStates.set(sessionID, state)
+				deps.sessionFirstTokenReceived.set(sessionID, false)
+				deps.sessionParentID.set(childID, sessionID)
+				// The child's last assistant message.updated predates the
+				// timer, then its bash tool ran for minutes emitting none —
+				// exactly the 2026-09-29T00:58:49Z kill.  The status map
+				// still reports it busy.
+				deps.sessionLastMessageTime.set(childID, Date.now() - 120_000)
+				;(deps.ctx.client.session.status as any).mockImplementation(async () => ({
+					data: {
+						[sessionID]: { type: "busy" },
+						[childID]: { type: "busy" },
+					},
+				}))
+
+				const helpers = createAutoRetryHelpers(deps)
+				helpers.scheduleSessionFallbackTimeout(sessionID)
+
+				await new Promise((r) => globalThis.setTimeout(r, 100))
+
+				expect(deps.ctx.client.session.abort).not.toHaveBeenCalled()
+				expect(deps.ctx.client.session.promptAsync).not.toHaveBeenCalled()
+				expect(deps.sessionFallbackTimeouts.has(sessionID)).toBe(true)
+				expect(readFileSync(getLogFilePath(), "utf-8")).toContain(
+					"Timeout fired while a child subagent session is still active; standing down instead of aborting"
+				)
+
+				helpers.clearSessionFallbackTimeout(sessionID)
+			})
+		})
+	})
+
 	describe("#given a fallback replay whose user message was removed by the abort", () => {
 		describe("#when the timeout fires", () => {
 			test("#then dispatches a fresh message instead of upserting the removed id", async () => {
@@ -548,8 +616,9 @@ describe("auto-retry integration", () => {
 					messagesData: [],
 				})
 				// First fetch (pre-abort replay selection) still sees the
-				// user message; the fetch after the abort sees it removed —
-				// the runtime reverted the unconfirmed turn.
+				// user message; the fetch after the abort does not.  The
+				// plugin cannot assume the replayed message survives the
+				// abort/dispatch window, so it must validate the id.
 				let messagesCallCount = 0
 				;(deps.ctx.client.session.messages as any).mockImplementation(async () => {
 					messagesCallCount++
@@ -565,8 +634,9 @@ describe("auto-retry integration", () => {
 					}
 					return { data: [] }
 				})
-				;(deps.ctx.client.session.get as any).mockImplementation(async () => ({
-					data: { status: { type: "busy" } },
+				// A genuinely stalled request: the runner is busy.
+				;(deps.ctx.client.session.status as any).mockImplementation(async () => ({
+					data: { [sessionID]: { type: "busy" } },
 				}))
 				;(deps.ctx.client.session.promptAsync as any).mockImplementation(
 					async (args: any) => {
